@@ -28,7 +28,17 @@
 - 已在 `install.sh` 中新增 `/etc/default/aimilivpn` 默认环境配置（仅不存在时创建，不覆盖用户现有配置）。
 - 已更新 README 中文/英文文档说明 PublicVPNList 是附加来源及过滤参数。
 
+### 验证记录
+- `python -m py_compile vpngate_manager.py vpn_utils.py proxy_server.py`：通过。
+- `bash -n install.sh`：通过。
+- `git diff --check`：通过。
+- PublicVPNList 样例行解析验证：通过，能生成 `https://publicvpnlist.com/download/101398/`。
+- PublicVPNList 实际 USA 国家页解析验证：通过，解析到 9 个过滤后条目，示例最高排序条目为 `87042 / 24.243.35.205 / 320.79 Mbps / 30 ms / score 69 / tcp`。
+- MCP 抓取 `/download/87042/` 受站点 robots.txt 限制，未通过 MCP 查看实际下载内容；运行时代码会按页面 `/download/{data-id}/` 下载 `.ovpn`。
+
+### 提交记录
+- 已创建本地提交：`5a4f0b4 feat: add PublicVPNList OpenVPN source`。
+- 推送 `origin main` 失败：GitHub 返回 403，当前账号 `youshang8520` 没有 `baoweise-bot/aimili-vpngate` 的推送权限。
+
 ### 待办
-- 运行 `python -m py_compile`、`bash -n install.sh`、`git diff --check`。
-- 做 PublicVPNList parser 样例验证。
-- 验证后提交并推送。
+- 如需远程备份/PR，需要用户提供可推送的 fork/远程仓库，或授权创建 fork 后再推送。
