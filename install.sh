@@ -131,6 +131,22 @@ fi
 
 # 5. Configure Service
 echo -e "\n${YELLOW}[3/4] 正在配置系统服务...${PLAIN}"
+if [ ! -f /etc/default/aimilivpn ]; then
+    echo -e "  -> 正在创建默认环境配置 /etc/default/aimilivpn ..."
+    cat > /etc/default/aimilivpn <<'EOF'
+# AimiliVPN optional source controls.
+# VPNGate remains enabled in code; PublicVPNList is an additional source, not a replacement.
+PUBLICVPNLIST_ENABLED=1
+PUBLICVPNLIST_SOURCES=https://publicvpnlist.com/country/usa/
+PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_MIN_SPEED=0
+PUBLICVPNLIST_MAX_LATENCY=0
+PUBLICVPNLIST_MIN_SCORE=0
+PUBLICVPNLIST_PROTO=all
+EOF
+else
+    echo -e "  -> 检测到已有 /etc/default/aimilivpn，保留用户现有环境配置。"
+fi
 if command -v systemctl >/dev/null 2>&1; then
     echo -e "  -> 检测到 systemd，正在创建服务配置 /lib/systemd/system/aimilivpn.service ..."
     cat > /lib/systemd/system/aimilivpn.service <<EOF

@@ -51,8 +51,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 
 #### 第二步：获取并连接节点
 1. 首次进入后台，节点列表可能正在进行首次自动测速与拉取。
-2. 点击 **“更新节点”** 按钮（或通过网页下方的网关/日志进行状态检查），程序会在后台通过多线程并发测速，自动筛选出延迟最低、可连接的 VPNGate 节点。
-3. 选择您喜欢的出站路由模式：
+2. 点击 **“更新节点”** 按钮（或通过网页下方的网关/日志进行状态检查），程序会在后台通过多线程并发测速，自动筛选出延迟最低、可连接的节点。
+3. 节点来源默认包含 **VPNGate 官方 API**，并额外支持 **PublicVPNList OpenVPN** 页面来源；PublicVPNList 是新增来源，不会替换原有 VPNGate 来源。
+4. 选择您喜欢的出站路由模式：
    - **智能自动配置**（推荐）：如果当前连接的节点失效，系统会在数秒内自动漂移连接至其他备用健康节点，无需手动干预。
    - **固定国家地区**：只选择指定国家（如日本 JP、韩国 KR、美国 US）的最佳节点。
    - **固定 IP 节点**：始终锁定连接到这一个特定节点。
@@ -91,6 +92,21 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
 * **日志追踪面板**：
   - **分类过滤**：可精准筛选查看特定功能的日志（如 VPN 连接日志、API 请求日志、系统异常等）。
   - **实时滚动与管理**：日志实时滚动加载，支持一键复制代码、一键导出 `.log` 日志文件到本地。
+
+#### PublicVPNList 附加来源配置
+PublicVPNList 默认作为额外来源启用，程序会解析国家页中的 `data-id`、`data-country`、`data-country-name`、`data-host`、`data-ip`、`data-speed`、`data-latency`、`data-port`、`data-proto`、`data-checked-at`，并读取页面里的 Technical score 后再下载 `/download/{data-id}/` 对应 `.ovpn` 配置。
+
+可在 `/etc/default/aimilivpn` 中调整：
+```bash
+PUBLICVPNLIST_ENABLED=1
+PUBLICVPNLIST_SOURCES=https://publicvpnlist.com/country/usa/
+PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_MIN_SPEED=0        # Mbps，0 表示不限制
+PUBLICVPNLIST_MAX_LATENCY=0      # ms，0 表示不限制
+PUBLICVPNLIST_MIN_SCORE=0        # Technical score，0 表示不限制
+PUBLICVPNLIST_PROTO=all          # all / tcp / udp
+```
+修改后执行 `ml restart` 生效。Technical score 是 PublicVPNList 的技术质量分，不等同于隐私或风控绝对保证。
 
 ---
 
@@ -177,8 +193,9 @@ Open your browser and navigate to the printed URL (e.g. `http://your_vps_ip:8787
 
 #### Step 2: Select Node and Mode
 1. Wait for the program to complete its first automatic node speed benchmarks.
-2. Under "Admin", you can trigger node fetching. The backend concurrently tests official VPNGate nodes and ranks them by latency.
-3. Switch routes mode (Smart Auto, Specific Region, or Specific Server Node) according to your needs.
+2. Under "Admin", you can trigger node fetching. The backend concurrently tests nodes and ranks them by latency.
+3. Node sources include the original official VPNGate API plus PublicVPNList OpenVPN country pages as an additional source; PublicVPNList does not replace VPNGate.
+4. Switch routes mode (Smart Auto, Specific Region, or Specific Server Node) according to your needs.
 
 #### Step 3: Use Localhost Proxy (Core Step)
 To prevent unauthorized scanning and abuse of the proxy port on the public internet, the built-in HTTP/SOCKS5 proxy server (default port **`7928`**) **binds to localhost (`127.0.0.1`) by default**. It is designed to route traffic generated locally on the VPS, rather than acting as a public proxy server.
@@ -201,6 +218,21 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
   Configure your scrapers, frameworks, or utility tools on this VPS to send traffic via `127.0.0.1:7928`.
 
 > 💡 **Quick Note**: If you really need to open this proxy port to the public internet, you can set the environment variable `export LOCAL_PROXY_HOST="::"` before running the manager.
+
+### PublicVPNList Additional Source
+PublicVPNList is enabled as an extra source by default. The manager parses country-page row fields such as `data-id`, `data-country`, `data-country-name`, `data-host`, `data-ip`, `data-speed`, `data-latency`, `data-port`, `data-proto`, and `data-checked-at`, reads the visible Technical score, then downloads the matching `/download/{data-id}/` `.ovpn` profile.
+
+Configure it in `/etc/default/aimilivpn`:
+```bash
+PUBLICVPNLIST_ENABLED=1
+PUBLICVPNLIST_SOURCES=https://publicvpnlist.com/country/usa/
+PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_MIN_SPEED=0        # Mbps; 0 disables the limit
+PUBLICVPNLIST_MAX_LATENCY=0      # ms; 0 disables the limit
+PUBLICVPNLIST_MIN_SCORE=0        # Technical score; 0 disables the limit
+PUBLICVPNLIST_PROTO=all          # all / tcp / udp
+```
+Run `ml restart` after changing these values. Technical score is PublicVPNList's technical quality score, not an absolute privacy or risk guarantee.
 
 ---
 
