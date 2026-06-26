@@ -40,6 +40,8 @@
 - 已创建本地提交：`5a4f0b4 feat: add PublicVPNList OpenVPN source`。
 - 推送 `origin main` 失败：GitHub 返回 403，当前账号 `youshang8520` 没有 `baoweise-bot/aimili-vpngate` 的推送权限。
 
-### 推送计划
+### 推送记录
 - 用户已要求“复刻并推送”。
-- 下一步：通过 GitHub CLI 创建当前账号可写的 fork，并将本地 `main` 分支提交推送到 fork。
+- 已通过 GitHub CLI 创建 fork：`https://github.com/youshang8520/aimili-vpngate`。
+- 已添加远程：`fork https://github.com/youshang8520/aimili-vpngate.git`。
+- 已将本地 `main` 分支推送到 fork。
