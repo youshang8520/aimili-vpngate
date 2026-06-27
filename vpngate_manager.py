@@ -128,11 +128,12 @@ def parse_float(value: Any, default: float = 0.0) -> float:
 
 API_URL = "https://www.vpngate.net/api/iphone/"
 PUBLICVPNLIST_ENABLED = os.environ.get("PUBLICVPNLIST_ENABLED", "1") == "1"
+PUBLICVPNLIST_AUTO_COUNTRIES = os.environ.get("PUBLICVPNLIST_AUTO_COUNTRIES", "1") == "1"
+PUBLICVPNLIST_COUNTRY_INDEX_URL = os.environ.get("PUBLICVPNLIST_COUNTRY_INDEX_URL", "https://publicvpnlist.com/").strip()
 PUBLICVPNLIST_SOURCES = [
-    u.strip() for u in os.environ.get(
-        "PUBLICVPNLIST_SOURCES", "https://publicvpnlist.com/country/usa/"
-    ).split(",") if u.strip()
+    u.strip() for u in os.environ.get("PUBLICVPNLIST_SOURCES", "").split(",") if u.strip()
 ]
+PUBLICVPNLIST_MAX_COUNTRIES = env_int("PUBLICVPNLIST_MAX_COUNTRIES", 0, 0)
 PUBLICVPNLIST_MAX_DOWNLOADS = env_int("PUBLICVPNLIST_MAX_DOWNLOADS", 30, 1)
 PUBLICVPNLIST_MIN_SPEED = env_float("PUBLICVPNLIST_MIN_SPEED", 0.0, 0.0)
 PUBLICVPNLIST_MAX_LATENCY = env_int("PUBLICVPNLIST_MAX_LATENCY", 0, 0)
@@ -260,6 +261,7 @@ def load_ui_config() -> dict[str, Any]:
             "routing_mode": "auto",
             "force_country": "",
             "routing_ip_type": "all",
+            "node_source_mode": "both",
             "connection_enabled": True,
             "fixed_node_id": "",
             "favorite_node_ids": [],
@@ -271,7 +273,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "node_source_mode", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -730,16 +732,59 @@ def extract_publicvpnlist_score(row_html: str, attrs: dict[str, str]) -> int:
             return int(round(value))
     return 0
 
+def resolve_node_source_mode(ui_cfg: dict[str, Any]) -> str:
+    mode = str(ui_cfg.get("node_source_mode") or "both").strip().lower()
+    if mode not in ("both", "vpngate", "publicvpnlist"):
+        return "both"
+    return mode
+
+
 def publicvpnlist_filter_summary() -> dict[str, Any]:
     return {
         "enabled": PUBLICVPNLIST_ENABLED,
+        "auto_countries": PUBLICVPNLIST_AUTO_COUNTRIES,
+        "country_index_url": PUBLICVPNLIST_COUNTRY_INDEX_URL,
         "sources": PUBLICVPNLIST_SOURCES,
+        "max_countries": PUBLICVPNLIST_MAX_COUNTRIES,
         "max_downloads": PUBLICVPNLIST_MAX_DOWNLOADS,
         "min_speed_mbps": PUBLICVPNLIST_MIN_SPEED,
         "max_latency_ms": PUBLICVPNLIST_MAX_LATENCY,
         "min_score": PUBLICVPNLIST_MIN_SCORE,
         "proto": PUBLICVPNLIST_PROTO or "all",
     }
+
+def extract_publicvpnlist_country_urls(index_url: str, text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"href\s*=\s*[\"']([^\"']*/country/[^\"']+/)[\"']", text, re.IGNORECASE):
+        url = urllib.parse.urljoin(index_url, html.unescape(match.group(1)))
+        parsed = urllib.parse.urlsplit(url)
+        normalized = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        if normalized not in seen:
+            seen.add(normalized)
+            urls.append(normalized)
+    if PUBLICVPNLIST_MAX_COUNTRIES > 0:
+        urls = urls[:PUBLICVPNLIST_MAX_COUNTRIES]
+    return urls
+
+def publicvpnlist_source_urls() -> list[str]:
+    if PUBLICVPNLIST_SOURCES:
+        return PUBLICVPNLIST_SOURCES
+    if not PUBLICVPNLIST_AUTO_COUNTRIES or not PUBLICVPNLIST_COUNTRY_INDEX_URL:
+        return []
+    try:
+        try:
+            index_text = fetch_api_text(PUBLICVPNLIST_COUNTRY_INDEX_URL, True, accept="text/html,*/*")
+        except Exception:
+            index_text = fetch_api_text(PUBLICVPNLIST_COUNTRY_INDEX_URL, False, accept="text/html,*/*")
+        urls = extract_publicvpnlist_country_urls(PUBLICVPNLIST_COUNTRY_INDEX_URL, index_text)
+        if urls:
+            print(f"[PublicVPNList] 自动发现 {len(urls)} 个国家页面", flush=True)
+            return urls
+    except Exception as exc:
+        print(f"[PublicVPNList] 自动发现国家页面失败: {exc}", flush=True)
+        log_to_json("WARNING", "Main", f"PublicVPNList 自动发现国家页面失败: {exc}")
+    return []
 
 def publicvpnlist_item_allowed(item: dict[str, Any]) -> bool:
     speed = parse_float(item.get("speed"), 0.0)
@@ -855,11 +900,14 @@ def publicvpnlist_item_to_node(item: dict[str, Any], config_text: str) -> dict[s
     }
 
 def fetch_publicvpnlist_candidates(seen_ips: set[str], blacklist: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    if not PUBLICVPNLIST_ENABLED or not PUBLICVPNLIST_SOURCES:
+    if not PUBLICVPNLIST_ENABLED:
+        return []
+    source_urls = publicvpnlist_source_urls()
+    if not source_urls:
         return []
     candidates: list[dict[str, Any]] = []
-    log_to_json("INFO", "Main", f"开始拉取 PublicVPNList 节点来源: {', '.join(PUBLICVPNLIST_SOURCES)}")
-    for source_url in PUBLICVPNLIST_SOURCES:
+    log_to_json("INFO", "Main", f"开始拉取 PublicVPNList 节点来源: {', '.join(source_urls)}")
+    for source_url in source_urls:
         if len(candidates) >= PUBLICVPNLIST_MAX_DOWNLOADS:
             break
         try:
@@ -981,11 +1029,13 @@ def fetch_candidates() -> list[dict[str, Any]]:
     blacklist = load_blacklist()
     candidates: list[dict[str, Any]] = []
     seen_ips = set()
-    
+    ui_cfg = load_ui_config()
+    source_mode = resolve_node_source_mode(ui_cfg)
+
     # 检查本地是否有节点缓存，以确定最大重试尝试次数
     has_cache = len(cached_nodes()) > 0
     max_attempts = 1 if has_cache else 2
-    
+
     # 尝试 URLs 队列: 1. HTTPS(验证证书) 2. HTTPS(不验证证书) 3. HTTP
     attempts_targets = [
         (API_URL, True),
@@ -993,54 +1043,58 @@ def fetch_candidates() -> list[dict[str, Any]]:
     ]
     if API_URL.startswith("https://"):
         attempts_targets.append((API_URL.replace("https://", "http://"), True))
-        
+
     log_to_json("INFO", "Main", "开始拉取官方 API 节点列表...")
-    
+
     last_err = None
-    for url, verify_ssl in attempts_targets:
-        for i in range(max_attempts):
-            if i > 0:
-                time.sleep(1.5)
-            try:
-                msg = f"尝试拉取 {url} (SSL验证: {verify_ssl}, 第 {i+1} 次尝试)..."
-                print(f"[fetch_candidates] {msg}", flush=True)
-                log_to_json("INFO", "Main", msg)
-                api_text = fetch_api_text(url, verify_ssl)
-                rows = parse_vpngate_rows(api_text)
-                for row in rows[:MAX_SCAN_ROWS]:
-                    ip = row.get("IP", "")
-                    if not ip or ip in seen_ips:
-                        continue
-                    encoded = row.get("OpenVPN_ConfigData_Base64", "")
-                    if not encoded:
-                        continue
-                    try:
-                        config_text = decode_config(encoded)
-                        node = row_to_node(row, config_text)
-                    except Exception as row_exc:
-                        print(f"[fetch_candidates] 跳过损坏的节点配置记录: {row_exc}", flush=True)
-                        log_to_json("WARNING", "Main", f"跳过损坏的节点配置记录: {row_exc}")
-                        continue
-                    entry = blacklist.get(node["id"])
-                    if entry and float(entry.get("until", 0) or 0) > time.time():
-                        continue
-                    candidates.append(node)
-                    seen_ips.add(ip)
-                if candidates:
-                    break
-            except Exception as e:
-                last_err = e
-                print(f"[fetch_candidates] 拉取失败 (URL: {url}, 验证: {verify_ssl}): {e}", flush=True)
-                log_to_json("WARNING", "Main", f"拉取失败 (URL: {url}, 验证: {verify_ssl}): {e}")
-        if candidates:
-            break
+    if source_mode in ("both", "vpngate"):
+        for url, verify_ssl in attempts_targets:
+            for i in range(max_attempts):
+                if i > 0:
+                    time.sleep(1.5)
+                try:
+                    msg = f"尝试拉取 {url} (SSL验证: {verify_ssl}, 第 {i+1} 次尝试)..."
+                    print(f"[fetch_candidates] {msg}", flush=True)
+                    log_to_json("INFO", "Main", msg)
+                    api_text = fetch_api_text(url, verify_ssl)
+                    rows = parse_vpngate_rows(api_text)
+                    for row in rows[:MAX_SCAN_ROWS]:
+                        ip = row.get("IP", "")
+                        if not ip or ip in seen_ips:
+                            continue
+                        encoded = row.get("OpenVPN_ConfigData_Base64", "")
+                        if not encoded:
+                            continue
+                        try:
+                            config_text = decode_config(encoded)
+                            node = row_to_node(row, config_text)
+                        except Exception as row_exc:
+                            print(f"[fetch_candidates] 跳过损坏的节点配置记录: {row_exc}", flush=True)
+                            log_to_json("WARNING", "Main", f"跳过损坏的节点配置记录: {row_exc}")
+                            continue
+                        entry = blacklist.get(node["id"])
+                        if entry and float(entry.get("until", 0) or 0) > time.time():
+                            continue
+                        candidates.append(node)
+                        seen_ips.add(ip)
+                    if candidates:
+                        break
+                except Exception as e:
+                    last_err = e
+                    print(f"[fetch_candidates] 拉取失败 (URL: {url}, 验证: {verify_ssl}): {e}", flush=True)
+                    log_to_json("WARNING", "Main", f"拉取失败 (URL: {url}, 验证: {verify_ssl}): {e}")
+            if candidates:
+                break
+    else:
+        print("[fetch_candidates] 当前已关闭 VPNGate 来源，仅保留 PublicVPNList 候选。", flush=True)
 
     vpngate_count = len(candidates)
     publicvpnlist_count = 0
     try:
-        public_nodes = fetch_publicvpnlist_candidates(seen_ips, blacklist)
-        publicvpnlist_count = len(public_nodes)
-        candidates.extend(public_nodes)
+        if source_mode in ("both", "publicvpnlist"):
+            public_nodes = fetch_publicvpnlist_candidates(seen_ips, blacklist)
+            publicvpnlist_count = len(public_nodes)
+            candidates.extend(public_nodes)
     except Exception as exc:
         print(f"[PublicVPNList] 附加来源拉取异常，保留已有 VPNGate 节点继续运行: {exc}", flush=True)
         log_to_json("WARNING", "Main", f"PublicVPNList 附加来源拉取异常: {exc}")
@@ -1059,7 +1113,7 @@ def fetch_candidates() -> list[dict[str, Any]]:
             raise RuntimeError(diag_msg) from last_err
         else:
             raise RuntimeError(diag_msg)
-                
+
     set_state(
         last_fetch_at=time.time(),
         last_fetch_status="ok",
@@ -3408,8 +3462,8 @@ INDEX_HTML = r"""<!doctype html>
         <svg xmlns="http://www.w3.org/2000/svg" style="width:12px; height:12px; margin-left: 2px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
       </button>
       <div id="github_dropdown" class="dropdown-content">
-        <a href="https://github.com/baoweise-bot/aimili-vpngate" target="_blank">正式版</a>
-        <a href="https://github.com/baoweise-bot/aimili-vpngate/tree/bate" target="_blank">测试版</a>
+        <a href="https://github.com/youshang8520/aimili-vpngate" target="_blank">PublicVPNList增强版</a>
+        <a href="https://github.com/baoweise-bot/aimili-vpngate" target="_blank">原版项目</a>
       </div>
     </div>
     <a href="https://t.me/arestemple" target="_blank" class="btn-telegram">
@@ -3637,8 +3691,24 @@ INDEX_HTML = r"""<!doctype html>
           </div>
           
           <div class="form-group" style="margin-bottom: 16px;">
-            <label class="form-label">IP 出站类型过滤</label>
-            <input type="hidden" id="net_routing_ip_type" value="all">
+            <label class="form-label">节点来源切换</label>
+            <input type="hidden" id="net_node_source_mode" value="both">
+            <div class="option-group" id="node_source_mode_group">
+              <div class="option-card active" data-value="both" onclick="setNodeSourceMode('both')">
+                <div class="option-card-title">双来源</div>
+                <div class="option-card-desc">VPNGate + PublicVPNList</div>
+              </div>
+              <div class="option-card" data-value="vpngate" onclick="setNodeSourceMode('vpngate')">
+                <div class="option-card-title">仅 VPNGate</div>
+                <div class="option-card-desc">只拉取官方 API 节点</div>
+              </div>
+              <div class="option-card" data-value="publicvpnlist" onclick="setNodeSourceMode('publicvpnlist')">
+                <div class="option-card-title">仅 PublicVPNList</div>
+                <div class="option-card-desc">只拉取 PublicVPNList</div>
+              </div>
+            </div>
+          </div>
+
             <div class="option-group" id="routing_ip_type_group">
               <div class="option-card active" data-value="all" onclick="setRoutingIpType('all')">
                 <div class="option-card-title">所有IP</div>
@@ -4571,7 +4641,7 @@ function selectOptionCard(groupName, value) {
   if (groupName === 'routing_mode') {
     const input = $("net_routing_mode");
     if (input) input.value = value;
-    
+
     const cards = document.querySelectorAll("#routing_mode_group .option-card");
     cards.forEach(card => {
       if (card.getAttribute("data-value") === value) {
@@ -4580,13 +4650,25 @@ function selectOptionCard(groupName, value) {
         card.classList.remove("active");
       }
     });
-    
+
     handleRoutingModeChange(value);
   } else if (groupName === 'routing_ip_type') {
     const input = $("net_routing_ip_type");
     if (input) input.value = value;
-    
+
     const cards = document.querySelectorAll("#routing_ip_type_group .option-card");
+    cards.forEach(card => {
+      if (card.getAttribute("data-value") === value) {
+        card.classList.add("active");
+      } else {
+        card.classList.remove("active");
+      }
+    });
+  } else if (groupName === 'node_source_mode') {
+    const input = $("net_node_source_mode");
+    if (input) input.value = value;
+
+    const cards = document.querySelectorAll("#node_source_mode_group .option-card");
     cards.forEach(card => {
       if (card.getAttribute("data-value") === value) {
         card.classList.add("active");
@@ -4603,6 +4685,10 @@ function setRoutingMode(value) {
 
 function setRoutingIpType(value) {
   selectOptionCard('routing_ip_type', value);
+}
+
+function setNodeSourceMode(value) {
+  selectOptionCard('node_source_mode', value);
 }
 
 function handleRoutingModeChange(mode) {
@@ -4779,9 +4865,11 @@ function openNetworkModal() {
     $("net_proxy_port").value = state.proxy_port || 7928;
     const mode = state.routing_mode || "auto";
     const ipType = state.routing_ip_type || "all";
-    
+    const sourceMode = state.node_source_mode || "both";
+
     selectOptionCard('routing_mode', mode);
     selectOptionCard('routing_ip_type', ipType);
+    selectOptionCard('node_source_mode', sourceMode);
   }
   
   populateRoutingCountries();
@@ -4806,6 +4894,7 @@ async function saveNetwork(e) {
   const routingMode = $("net_routing_mode").value;
   const forceCountry = $("net_force_country").value;
   const routingIpType = $("net_routing_ip_type").value;
+  const sourceMode = $("net_node_source_mode").value;
   
   if (isNaN(proxyPort) || proxyPort < 1024 || proxyPort > 65535) {
     errorDivEl.textContent = "代理出站端口范围必须在 1024 至 65535 之间";
@@ -4829,6 +4918,12 @@ async function saveNetwork(e) {
     errorDivEl.style.display = "block";
     return;
   }
+  if (!["both", "vpngate", "publicvpnlist"].includes(sourceMode)) {
+    errorDivEl.textContent = "无效的节点来源切换";
+    errorDivEl.style.display = "block";
+    return;
+  }
+
   
   submitBtn.disabled = true;
   submitBtn.textContent = "正在保存...";
@@ -4841,7 +4936,8 @@ async function saveNetwork(e) {
         proxy_port: proxyPort,
         routing_mode: routingMode,
         force_country: forceCountry,
-        routing_ip_type: routingIpType
+        routing_ip_type: routingIpType,
+        node_source_mode: sourceMode
       })
     });
     
@@ -5700,7 +5796,7 @@ class Handler(BaseHTTPRequestHandler):
                 routing_mode = str(payload.get("routing_mode") or "auto").strip()
                 force_country = str(payload.get("force_country") or "").strip()
                 routing_ip_type = str(payload.get("routing_ip_type") or "all").strip()
-                
+                node_source_mode = str(payload.get("node_source_mode") or "both").strip().lower()
                 try:
                     new_proxy_port_int = int(new_proxy_port)
                     if not (1024 <= new_proxy_port_int <= 65535):
@@ -5715,8 +5811,8 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_mode == "fixed_region" and not force_country:
                     self.send_json({"ok": False, "error": "启用固定地区前，请先选择一个要锁定的国家"}, HTTPStatus.BAD_REQUEST)
                     return
-                if routing_ip_type not in ("all", "residential", "hosting"):
-                    self.send_json({"ok": False, "error": "无效的IP出站类型过滤"}, HTTPStatus.BAD_REQUEST)
+                if node_source_mode not in ("both", "vpngate", "publicvpnlist"):
+                    self.send_json({"ok": False, "error": "无效的节点来源切换"}, HTTPStatus.BAD_REQUEST)
                     return
                 
                 ui_cfg = load_ui_config()
@@ -5734,6 +5830,7 @@ class Handler(BaseHTTPRequestHandler):
                 ui_cfg["routing_mode"] = routing_mode
                 ui_cfg["force_country"] = force_country
                 ui_cfg["routing_ip_type"] = routing_ip_type
+                ui_cfg["node_source_mode"] = node_source_mode
                 if routing_mode == "favorites":
                     ui_cfg["fav_fail_fallback"] = False
                 if routing_mode == "fixed_ip":
@@ -5744,8 +5841,13 @@ class Handler(BaseHTTPRequestHandler):
                     DATA_DIR.mkdir(exist_ok=True, parents=True)
                     write_json(auth_file, ui_cfg)
 
+                source_message = ""
+                if source_mode != node_source_mode:
+                    source_message = "节点来源切换已保存，正在按新来源刷新候选节点..."
+                    threading.Thread(target=lambda: refresh_nodes(True), daemon=True).start()
+
                 policy_message = enforce_active_node_allowed_by_routing(ui_cfg, "路由设置已更新")
-                
+
                 restart_needed = (new_proxy_port_int != expected_proxy_port)
                 if restart_needed:
                     self.send_json({"ok": True, "restart_needed": True, "message": "配置更新成功，代理出站端口变更，将在 2 秒内重启..."})
@@ -5757,7 +5859,7 @@ class Handler(BaseHTTPRequestHandler):
                     
                     threading.Thread(target=restart_server, daemon=True).start()
                 else:
-                    message = policy_message or "配置更新成功，已即时生效！"
+                    message = source_message or policy_message or "配置更新成功，已即时生效！"
                     self.send_json({"ok": True, "restart_needed": False, "message": message})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -5769,7 +5871,7 @@ class Handler(BaseHTTPRequestHandler):
                 routing_mode = str(payload.get("routing_mode") or "auto").strip()
                 force_country = str(payload.get("force_country") or "").strip()
                 routing_ip_type = str(payload.get("routing_ip_type") or "all").strip()
-                fav_fail_fallback = False
+                node_source_mode = str(payload.get("node_source_mode") or "both").strip().lower()
                 
                 if routing_mode not in ("auto", "fixed_ip", "fixed_region", "favorites"):
                     self.send_json({"ok": False, "error": "无效的路由配置模式"}, HTTPStatus.BAD_REQUEST)
@@ -5777,8 +5879,8 @@ class Handler(BaseHTTPRequestHandler):
                 if routing_mode == "fixed_region" and not force_country:
                     self.send_json({"ok": False, "error": "启用固定地区前，请先选择一个要锁定的国家"}, HTTPStatus.BAD_REQUEST)
                     return
-                if routing_ip_type not in ("all", "residential", "hosting"):
-                    self.send_json({"ok": False, "error": "无效的IP出站类型过滤"}, HTTPStatus.BAD_REQUEST)
+                if node_source_mode not in ("both", "vpngate", "publicvpnlist"):
+                    self.send_json({"ok": False, "error": "无效的节点来源切换"}, HTTPStatus.BAD_REQUEST)
                     return
                 
                 ui_cfg = load_ui_config()
@@ -5790,24 +5892,24 @@ class Handler(BaseHTTPRequestHandler):
                 ui_cfg["routing_mode"] = routing_mode
                 ui_cfg["force_country"] = force_country
                 ui_cfg["routing_ip_type"] = routing_ip_type
-                ui_cfg["fav_fail_fallback"] = fav_fail_fallback
+                ui_cfg["node_source_mode"] = node_source_mode
                 if routing_mode == "fixed_ip":
                     ui_cfg["fixed_node_id"] = fixed_node_id
                 ui_cfg.pop("enable_force_country", None)
-                
-                auth_file = DATA_DIR / "ui_auth.json"
-                with lock:
-                    DATA_DIR.mkdir(exist_ok=True, parents=True)
-                    write_json(auth_file, ui_cfg)
+                source_mode = resolve_node_source_mode(ui_cfg)
+                source_message = ""
+                if source_mode != node_source_mode:
+                    source_message = "节点来源切换已保存，正在按新来源刷新候选节点..."
+                    threading.Thread(target=lambda: refresh_nodes(True), daemon=True).start()
 
                 policy_message = enforce_active_node_allowed_by_routing(ui_cfg, "出站路由配置已更新")
-                
-                self.send_json({"ok": True, "message": policy_message or "出站路由配置更新成功，已即时生效！"})
+                message = source_message or policy_message or "出站路由配置更新成功，已即时生效！"
+
+                self.send_json({"ok": True, "message": message})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        elif effective_path == "/api/toggle_favorite":
             try:
                 payload = self.read_json_body()
                 node_id = str(payload.get("id") or "").strip()

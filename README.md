@@ -7,7 +7,7 @@ Bilingual: [中文](#中文) | [English](#english)
 <a name="中文"></a>
 ## 中文 (Chinese)
 
-AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN 代理网关。它以纯 Python 标准库编写，内置美观响应式的管理网页，提供智能并发测速、多路由模式、出站代理网关、实时日志等强大功能。
+AimiliVPN PublicVPNList 增强版是在原 AimiliVPN / VPNGate 基础上增加 PublicVPNList OpenVPN 节点来源的高性能、零依赖 VPN 代理网关。它以纯 Python 标准库编写，保留原有 VPNGate 来源与多路由模式，同时支持按 PublicVPNList 的速度、延迟、协议与 Technical score 过滤节点，并提供本地 HTTP/SOCKS5 出站代理网关、管理网页、实时日志等功能。
 
 ---
 
@@ -34,9 +34,9 @@ AimiliVPN 是一款基于官方 VPNGate 开放协议的高性能、零依赖 VPN
 
 在您的 Linux VPS 上以 root 用户执行以下对应命令：
 
-#### 🌟 正式稳定版本 (main 分支)
+#### 🌟 PublicVPNList 增强版本 (youshang8520/main 分支)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/youshang8520/aimili-vpngate/main/install.sh)
 ```
 > 💡 **小贴士**：部署完成后，终端会输出管理网页的专属链接（含随机安全后缀，如 `http://your_vps_ip:8787/u71e9IXp4TPx`）。在终端中输入 `ml` 命令可以随时调出交互式命令行管理菜单。
 
@@ -94,12 +94,15 @@ bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/ma
   - **实时滚动与管理**：日志实时滚动加载，支持一键复制代码、一键导出 `.log` 日志文件到本地。
 
 #### PublicVPNList 附加来源配置
-PublicVPNList 默认作为额外来源启用，程序会解析国家页中的 `data-id`、`data-country`、`data-country-name`、`data-host`、`data-ip`、`data-speed`、`data-latency`、`data-port`、`data-proto`、`data-checked-at`，并读取页面里的 Technical score 后再下载 `/download/{data-id}/` 对应 `.ovpn` 配置。
+PublicVPNList 默认作为额外来源启用。默认配置不会固定某一个国家；当 `PUBLICVPNLIST_SOURCES` 留空且 `PUBLICVPNLIST_AUTO_COUNTRIES=1` 时，程序会先从 PublicVPNList 首页自动发现 `/country/.../` 国家页，再解析每个国家页中的 `data-id`、`data-country`、`data-country-name`、`data-host`、`data-ip`、`data-speed`、`data-latency`、`data-port`、`data-proto`、`data-checked-at`，并读取页面里的 Technical score 后再下载 `/download/{data-id}/` 对应 `.ovpn` 配置。
 
 可在 `/etc/default/aimilivpn` 中调整：
 ```bash
 PUBLICVPNLIST_ENABLED=1
-PUBLICVPNLIST_SOURCES=https://publicvpnlist.com/country/usa/
+PUBLICVPNLIST_AUTO_COUNTRIES=1
+PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
+PUBLICVPNLIST_SOURCES=           # 留空表示自动发现所有国家页；也可手动填多个 URL，用逗号分隔
+PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 表示不限制国家页数量
 PUBLICVPNLIST_MAX_DOWNLOADS=30
 PUBLICVPNLIST_MIN_SPEED=0        # Mbps，0 表示不限制
 PUBLICVPNLIST_MAX_LATENCY=0      # ms，0 表示不限制
@@ -153,7 +156,7 @@ PUBLICVPNLIST_PROTO=all          # all / tcp / udp
 <a name="english"></a>
 ## English
 
-AimiliVPN is a high-performance, zero-dependency VPN proxy gateway built entirely using Python's standard library. It parses official VPNGate servers, benchmarks latency, and routes traffic through a built-in dual-protocol (HTTP/SOCKS5) proxy server.
+AimiliVPN PublicVPNList Edition is a high-performance, zero-dependency VPN proxy gateway based on the original AimiliVPN / VPNGate workflow with an added PublicVPNList OpenVPN source. It keeps the existing VPNGate source and routing modes, adds PublicVPNList speed/latency/protocol/Technical-score filtering, benchmarks nodes, and routes traffic through a built-in dual-protocol (HTTP/SOCKS5) proxy server.
 
 ### 🌟 Recommended VPS Deals
 [![BandwagonHost Premium Optimized Routes](https://img.shields.io/badge/BandwagonHost-Premium%20Optimized%20Routes-red?style=for-the-badge)](https://bandwagonhost.com/aff.php?aff=81790)
@@ -177,9 +180,9 @@ AimiliVPN is a high-performance, zero-dependency VPN proxy gateway built entirel
 
 Run the corresponding command on your Linux VPS as root:
 
-#### 🌟 Stable Release (main branch)
+#### 🌟 PublicVPNList Edition (youshang8520/main branch)
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/baoweise-bot/aimili-vpngate/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/youshang8520/aimili-vpngate/main/install.sh)
 ```
 
 > 💡 **Quick Note**: Once installed, copy the printed URL from the terminal to access the Web UI. Type the `ml` command in the terminal to summon the interactive CLI management console.
@@ -225,7 +228,10 @@ PublicVPNList is enabled as an extra source by default. The manager parses count
 Configure it in `/etc/default/aimilivpn`:
 ```bash
 PUBLICVPNLIST_ENABLED=1
-PUBLICVPNLIST_SOURCES=https://publicvpnlist.com/country/usa/
+PUBLICVPNLIST_AUTO_COUNTRIES=1
+PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
+PUBLICVPNLIST_SOURCES=           # empty = auto-discover all country pages; or set comma-separated URLs manually
+PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 disables the country-page limit
 PUBLICVPNLIST_MAX_DOWNLOADS=30
 PUBLICVPNLIST_MIN_SPEED=0        # Mbps; 0 disables the limit
 PUBLICVPNLIST_MAX_LATENCY=0      # ms; 0 disables the limit

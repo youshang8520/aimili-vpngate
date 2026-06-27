@@ -47,8 +47,8 @@ echo -e "${BLUE}        欢迎使用 AimiliVPN 一键源码部署与管理脚本
 echo -e "${BLUE}==========================================================${PLAIN}"
 
 # 3. Configure GitHub Repository URL
-# Default to the official repository (baoweise-bot/aimili-vpngate)
-DEFAULT_USER="baoweise-bot"
+# Default to the PublicVPNList-enhanced fork (youshang8520/aimili-vpngate)
+DEFAULT_USER="youshang8520"
 DEFAULT_REPO="aimili-vpngate"
 
 # Allow custom repository override via command line arguments
@@ -136,8 +136,12 @@ if [ ! -f /etc/default/aimilivpn ]; then
     cat > /etc/default/aimilivpn <<'EOF'
 # AimiliVPN optional source controls.
 # VPNGate remains enabled in code; PublicVPNList is an additional source, not a replacement.
+# Leave PUBLICVPNLIST_SOURCES empty to auto-discover country pages from PUBLICVPNLIST_COUNTRY_INDEX_URL.
 PUBLICVPNLIST_ENABLED=1
-PUBLICVPNLIST_SOURCES=https://publicvpnlist.com/country/usa/
+PUBLICVPNLIST_AUTO_COUNTRIES=1
+PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
+PUBLICVPNLIST_SOURCES=
+PUBLICVPNLIST_MAX_COUNTRIES=0
 PUBLICVPNLIST_MAX_DOWNLOADS=30
 PUBLICVPNLIST_MIN_SPEED=0
 PUBLICVPNLIST_MAX_LATENCY=0
