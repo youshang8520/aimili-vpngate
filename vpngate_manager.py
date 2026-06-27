@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import csv
 import html
+import http.cookiejar
 import json
 import os
 import queue
@@ -137,6 +138,7 @@ PUBLICVPNLIST_MAX_COUNTRIES = env_int("PUBLICVPNLIST_MAX_COUNTRIES", 0, 0)
 PUBLICVPNLIST_PER_COUNTRY_LIMIT = env_int("PUBLICVPNLIST_PER_COUNTRY_LIMIT", 20, 0)
 PUBLICVPNLIST_MAX_DOWNLOADS = env_int("PUBLICVPNLIST_MAX_DOWNLOADS", 0, 0)
 PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD = os.environ.get("PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD", "1") == "1"
+PUBLICVPNLIST_PLAYWRIGHT_FALLBACK = os.environ.get("PUBLICVPNLIST_PLAYWRIGHT_FALLBACK", "1") == "1"
 PUBLICVPNLIST_MIN_SPEED = env_float("PUBLICVPNLIST_MIN_SPEED", 0.0, 0.0)
 PUBLICVPNLIST_MAX_LATENCY = env_int("PUBLICVPNLIST_MAX_LATENCY", 0, 0)
 PUBLICVPNLIST_MIN_SCORE = env_int("PUBLICVPNLIST_MIN_SCORE", 0, 0)
@@ -765,6 +767,8 @@ def publicvpnlist_filter_summary() -> dict[str, Any]:
         "per_country_limit": PUBLICVPNLIST_PER_COUNTRY_LIMIT,
         "max_downloads": PUBLICVPNLIST_MAX_DOWNLOADS,
         "require_real_download": PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD,
+        "download_mode": "http_first_playwright_fallback" if PUBLICVPNLIST_PLAYWRIGHT_FALLBACK else "http_first_only",
+        "playwright_fallback": PUBLICVPNLIST_PLAYWRIGHT_FALLBACK,
         "min_speed_mbps": PUBLICVPNLIST_MIN_SPEED,
         "max_latency_ms": PUBLICVPNLIST_MAX_LATENCY,
         "min_score": PUBLICVPNLIST_MIN_SCORE,
@@ -1094,7 +1098,7 @@ def fetch_publicvpnlist_candidates(seen_ips: set[str], blacklist: dict[str, dict
             if not download_url:
                 continue
             try:
-                config_text = fetch_publicvpnlist_ovpn_config(download_url, page_text)
+                config_text = fetch_publicvpnlist_ovpn_config(item, page_text)
                 if not config_text and not PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD:
                     config_text = build_publicvpnlist_ovpn(item)
                 ok, reason = publicvpnlist_config_matches_item(item, config_text)
@@ -1132,7 +1136,129 @@ def publicvpnlist_prepare_download_page(download_url: str) -> str:
         return ""
     return page
 
-def fetch_publicvpnlist_ovpn_config(download_url: str, text: str) -> str:
+
+class PublicVPNListLiveCheckFailed(RuntimeError):
+    pass
+
+
+def publicvpnlist_base_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+
+
+def publicvpnlist_id_from_download_url(download_url: str) -> str:
+    parsed = urllib.parse.urlsplit(download_url)
+    match = re.search(r"/download/([^/?#]+)/?", parsed.path)
+    if match:
+        return urllib.parse.unquote(match.group(1)).strip()
+    query = urllib.parse.parse_qs(parsed.query)
+    return str((query.get("id") or [""])[0]).strip()
+
+
+def publicvpnlist_build_http_opener() -> urllib.request.OpenerDirector:
+    cookie_jar = http.cookiejar.CookieJar()
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+
+
+def publicvpnlist_http_get(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    accept: str,
+    referer: str = "",
+    timeout: int = 120,
+) -> tuple[int, str, bytes]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept": accept,
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+    }
+    if referer:
+        headers["Referer"] = referer
+        headers["X-Requested-With"] = "XMLHttpRequest"
+    request = urllib.request.Request(url, headers=headers)
+    with opener.open(request, timeout=timeout) as response:
+        return response.status, response.headers.get("content-type", ""), response.read()
+
+
+def publicvpnlist_http_json(opener: urllib.request.OpenerDirector, url: str, referer: str) -> tuple[int, dict[str, Any]]:
+    status, _content_type, body = publicvpnlist_http_get(opener, url, "application/json,text/plain,*/*", referer)
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except Exception:
+        data = {"ok": False, "error": body.decode("utf-8", errors="replace")[:200]}
+    if not isinstance(data, dict):
+        data = {"ok": False, "error": "JSON root is not an object"}
+    return status, data
+
+
+def fetch_publicvpnlist_ovpn_config_http(item: dict[str, Any]) -> str:
+    download_url = str(item.get("download_url") or "").strip()
+    cfg_id = str(item.get("id") or publicvpnlist_id_from_download_url(download_url)).strip()
+    if not download_url or not cfg_id:
+        return ""
+
+    opener = publicvpnlist_build_http_opener()
+    base_url = publicvpnlist_base_url(download_url)
+    try:
+        publicvpnlist_http_get(opener, download_url, "text/html,*/*")
+    except Exception as exc:
+        print(f"[PublicVPNList] HTTP 详情页打开失败 {cfg_id}: {exc}", flush=True)
+        return ""
+
+    cache_buster = str(int(time.time() * 1000))
+    test_url = urllib.parse.urljoin(base_url, f"test_server.php?id={urllib.parse.quote(cfg_id)}&_={cache_buster}")
+    try:
+        test_status, test_data = publicvpnlist_http_json(opener, test_url, download_url)
+    except Exception as exc:
+        print(f"[PublicVPNList] HTTP 实时检查请求失败 {cfg_id}: {exc}", flush=True)
+        return ""
+
+    live_status = str(test_data.get("status") or "")
+    if test_status != 200 or not test_data.get("ok") or live_status != "ok":
+        reason = str(test_data.get("error") or test_data.get("message") or live_status or "unknown")
+        print(f"[PublicVPNList] HTTP 实时检查未通过 {cfg_id}: {reason}", flush=True)
+        raise PublicVPNListLiveCheckFailed(reason)
+
+    token_url = urllib.parse.urljoin(base_url, f"get_token.php?id={urllib.parse.quote(cfg_id)}&_={int(time.time() * 1000)}")
+    try:
+        token_status, token_data = publicvpnlist_http_json(opener, token_url, download_url)
+    except Exception as exc:
+        print(f"[PublicVPNList] HTTP token 请求失败 {cfg_id}: {exc}", flush=True)
+        return ""
+
+    dl_value = str(token_data.get("url") or "").strip()
+    if not dl_value and token_data.get("token"):
+        dl_value = "download.php?token=" + urllib.parse.quote(str(token_data.get("token") or ""))
+    if token_status != 200 or not dl_value:
+        reason = str(token_data.get("error") or token_data.get("message") or "empty download url")
+        print(f"[PublicVPNList] HTTP token 生成失败 {cfg_id}: {reason}", flush=True)
+        return ""
+
+    target = urllib.parse.urljoin(base_url, dl_value)
+    try:
+        download_status, content_type, content = publicvpnlist_http_get(
+            opener,
+            target,
+            "application/x-openvpn-profile,text/plain,*/*",
+            download_url,
+        )
+    except Exception as exc:
+        print(f"[PublicVPNList] HTTP .ovpn 下载失败 {cfg_id}: {exc}", flush=True)
+        return ""
+
+    text = content.decode("utf-8", errors="replace")
+    if download_status != 200 or not looks_like_openvpn_config(text):
+        print(f"[PublicVPNList] HTTP 下载内容不是 OpenVPN 配置 {cfg_id}: status={download_status} type={content_type}", flush=True)
+        return ""
+    ok, reason = publicvpnlist_config_matches_item(item, text)
+    if not ok:
+        print(f"[PublicVPNList] HTTP 下载配置校验失败 {cfg_id}: {reason}", flush=True)
+        return ""
+    return text
+
+
+def fetch_publicvpnlist_ovpn_config_playwright(download_url: str, text: str) -> str:
     target = extract_publicvpnlist_download_target(download_url, text)
     if target:
         try:
@@ -1168,6 +1294,32 @@ def fetch_publicvpnlist_ovpn_config(download_url: str, text: str) -> str:
         except Exception:
             return fetch_api_text(alt_target, False, accept="application/x-openvpn-profile,text/plain,*/*")
     except Exception:
+        return ""
+
+
+def fetch_publicvpnlist_ovpn_config(item_or_url: dict[str, Any] | str, text: str = "") -> str:
+    if isinstance(item_or_url, dict):
+        item = item_or_url
+        download_url = str(item.get("download_url") or "").strip()
+    else:
+        download_url = str(item_or_url or "").strip()
+        item = {"id": publicvpnlist_id_from_download_url(download_url), "download_url": download_url}
+
+    try:
+        config_text = fetch_publicvpnlist_ovpn_config_http(item)
+    except PublicVPNListLiveCheckFailed:
+        return ""
+    if config_text:
+        return config_text
+
+    if not PUBLICVPNLIST_PLAYWRIGHT_FALLBACK:
+        return ""
+
+    print("[PublicVPNList] HTTP 链路未取得可用 .ovpn，尝试 Playwright 备用链路。", flush=True)
+    try:
+        return fetch_publicvpnlist_ovpn_config_playwright(download_url, text)
+    except Exception as exc:
+        print(f"[PublicVPNList] Playwright 备用链路失败: {exc}", flush=True)
         return ""
 
 def load_blacklist() -> dict[str, dict[str, Any]]:

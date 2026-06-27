@@ -110,7 +110,7 @@ setup_python_runtime() {
     else
         "${venv_dir}/bin/python" -m pip install 'playwright>=1.45.0,<2'
     fi
-    echo -e "  -> 正在安装 Playwright Chromium，用于 PublicVPNList 真实交互下载链路 ..."
+    echo -e "  -> 正在安装 Playwright Chromium，用于 PublicVPNList HTTP 链路失败时的备用交互下载 ..."
     if ! "${venv_dir}/bin/python" -m playwright install --with-deps chromium; then
         echo -e "${YELLOW}  -> Playwright 依赖自动安装未完全成功，正在尝试仅安装 Chromium 浏览器包。${PLAIN}"
         "${venv_dir}/bin/python" -m playwright install chromium
@@ -190,6 +190,7 @@ PUBLICVPNLIST_MAX_COUNTRIES=0
 PUBLICVPNLIST_PER_COUNTRY_LIMIT=20
 PUBLICVPNLIST_MAX_DOWNLOADS=0
 PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1
+PUBLICVPNLIST_PLAYWRIGHT_FALLBACK=1
 PUBLICVPNLIST_MIN_SPEED=0
 PUBLICVPNLIST_MAX_LATENCY=0
 PUBLICVPNLIST_MIN_SCORE=0
@@ -207,6 +208,7 @@ update_env_default_line /etc/default/aimilivpn PUBLICVPNLIST_MAX_DOWNLOADS 30 0
 ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_PER_COUNTRY_LIMIT 20
 ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_MAX_DOWNLOADS 0
 ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD 1
+ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_PLAYWRIGHT_FALLBACK 1
 ensure_env_line /etc/default/aimilivpn FETCH_INTERVAL_SECONDS 86400
 ensure_env_line /etc/default/aimilivpn CHECK_INTERVAL_SECONDS 86400
 ensure_env_line /etc/default/aimilivpn LOW_POOL_RETRY_SECONDS 300
