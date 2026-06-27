@@ -91,7 +91,11 @@ compare_dir() {
         if [ -d "$REPO_DIR/openvpn-compat" ]; then
             find "$REPO_DIR/openvpn-compat" -maxdepth 2 -type f | sort > "$OUTPUT_DIR/repo-files.txt"
             diff -u "$OUTPUT_DIR/repo-files.txt" "$OUTPUT_DIR/source-files.txt" > "$OUTPUT_DIR/file-list.diff" || true
+        else
+            echo "# repository openvpn-compat directory missing" > "$OUTPUT_DIR/file-list.diff"
         fi
+    else
+        echo "# compatibility source directory missing: $source_dir" > "$OUTPUT_DIR/file-list.diff"
     fi
 }
 
@@ -134,7 +138,7 @@ EOF
 cat > "$OUTPUT_DIR/next-steps.txt" <<'EOF'
 1. Review sysctl-state.txt for rp_filter and forwarding values.
 2. Review path-state.txt for existing OpenVPN compatibility files.
-3. Review file-list.diff to see which compatibility files exist in the repo helper.
+3. Review file-list.diff for repository/source compatibility differences or a missing-source note.
 4. Copy any required preserved settings into the repository-side OpenVPN compatibility helper.
 EOF
 
