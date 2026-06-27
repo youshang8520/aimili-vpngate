@@ -134,7 +134,8 @@ PUBLICVPNLIST_SOURCES = [
     u.strip() for u in os.environ.get("PUBLICVPNLIST_SOURCES", "").split(",") if u.strip()
 ]
 PUBLICVPNLIST_MAX_COUNTRIES = env_int("PUBLICVPNLIST_MAX_COUNTRIES", 0, 0)
-PUBLICVPNLIST_MAX_DOWNLOADS = env_int("PUBLICVPNLIST_MAX_DOWNLOADS", 30, 1)
+PUBLICVPNLIST_MAX_DOWNLOADS = env_int("PUBLICVPNLIST_MAX_DOWNLOADS", 30, 0)
+PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD = os.environ.get("PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD", "1") == "1"
 PUBLICVPNLIST_MIN_SPEED = env_float("PUBLICVPNLIST_MIN_SPEED", 0.0, 0.0)
 PUBLICVPNLIST_MAX_LATENCY = env_int("PUBLICVPNLIST_MAX_LATENCY", 0, 0)
 PUBLICVPNLIST_MIN_SCORE = env_int("PUBLICVPNLIST_MIN_SCORE", 0, 0)
@@ -696,6 +697,18 @@ def fetch_api_text(url: str | None = None, use_ssl_verify: bool = True, accept: 
         with urllib.request.urlopen(request, timeout=12) as response:
             return response.read().decode("utf-8", errors="replace")
 
+
+def fetch_publicvpnlist_page_html(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 vpngate-openvpn-manager/2.0",
+            "Accept": "text/html,*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        return response.read().decode("utf-8", errors="replace")
+
 def parse_vpngate_rows(text: str) -> list[dict[str, str]]:
     lines = [line for line in text.splitlines() if line and not line.startswith("*")]
     if lines and lines[0].startswith("#"):
@@ -747,6 +760,7 @@ def publicvpnlist_filter_summary() -> dict[str, Any]:
         "sources": PUBLICVPNLIST_SOURCES,
         "max_countries": PUBLICVPNLIST_MAX_COUNTRIES,
         "max_downloads": PUBLICVPNLIST_MAX_DOWNLOADS,
+        "require_real_download": PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD,
         "min_speed_mbps": PUBLICVPNLIST_MIN_SPEED,
         "max_latency_ms": PUBLICVPNLIST_MAX_LATENCY,
         "min_score": PUBLICVPNLIST_MIN_SCORE,
@@ -801,6 +815,7 @@ def publicvpnlist_item_allowed(item: dict[str, Any]) -> bool:
         return False
     return True
 
+
 def extract_publicvpnlist_items(source_url: str, text: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     row_pattern = re.compile(r"<tr\b([^>]*)>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -835,6 +850,7 @@ def extract_publicvpnlist_items(source_url: str, text: str) -> list[dict[str, An
             "measurement_region": attrs.get("data-measurement-region", ""),
             "score": score,
             "download_url": urllib.parse.urljoin(source_url, f"/download/{cfg_id}/"),
+            "reachable": "we could not confirm that this server is currently reachable" not in body.lower(),
         }
         if publicvpnlist_item_allowed(item):
             items.append(item)
@@ -844,6 +860,65 @@ def extract_publicvpnlist_items(source_url: str, text: str) -> list[dict[str, An
 def looks_like_openvpn_config(text: str) -> bool:
     lowered = text.lower()
     return "remote " in lowered and ("client" in lowered or "dev tun" in lowered or "dev-type tun" in lowered)
+
+
+def extract_ovpn_remote(text: str) -> tuple[str, int, str]:
+    remote_host = ""
+    remote_port = 0
+    remote_proto = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        parts = stripped.split()
+        key = parts[0].lower()
+        if key == "remote" and len(parts) >= 3 and not remote_host:
+            remote_host = parts[1]
+            remote_port = parse_int(parts[2])
+            if len(parts) >= 4:
+                remote_proto = parts[3].lower().replace("-client", "")
+        elif key == "proto" and len(parts) >= 2 and not remote_proto:
+            remote_proto = parts[1].lower().replace("-client", "")
+    return remote_host, remote_port, remote_proto
+
+
+def publicvpnlist_config_matches_item(item: dict[str, Any], config_text: str) -> tuple[bool, str]:
+    if not looks_like_openvpn_config(config_text):
+        return False, "downloaded content is not an OpenVPN profile"
+    remote_host, remote_port, remote_proto = extract_ovpn_remote(config_text)
+    expected_hosts = {str(item.get("ip") or "").strip(), str(item.get("host") or "").strip()}
+    expected_hosts.discard("")
+    expected_port = parse_int(item.get("port"))
+    expected_proto = str(item.get("proto") or "").strip().lower()
+    if remote_host not in expected_hosts:
+        return False, f"remote host mismatch: expected {sorted(expected_hosts)}, got {remote_host or '<empty>'}"
+    if expected_port and remote_port != expected_port:
+        return False, f"remote port mismatch: expected {expected_port}, got {remote_port or '<empty>'}"
+    if expected_proto in ("tcp", "udp") and remote_proto in ("tcp", "udp") and remote_proto != expected_proto:
+        return False, f"remote proto mismatch: expected {expected_proto}, got {remote_proto}"
+    return True, ""
+
+def build_publicvpnlist_ovpn(item: dict[str, Any], remote_host: str | None = None, remote_port: int | None = None, proto: str | None = None, config_lines: list[str] | None = None) -> str:
+    ip = str(item.get("ip") or item.get("host") or remote_host or "").strip()
+    host = str(remote_host or ip).strip()
+    port = remote_port or parse_int(item.get("port"))
+    proto_value = str(proto or item.get("proto") or "tcp").strip().lower()
+    if proto_value not in ("tcp", "udp"):
+        proto_value = "tcp"
+    lines = [
+        "client",
+        f"proto {proto_value}",
+        f"remote {host} {port}",
+        "resolv-retry infinite",
+        "nobind",
+        "persist-key",
+        "persist-tun",
+        "remote-cert-tls server",
+        "verb 3",
+    ]
+    if config_lines:
+        lines.extend(config_lines)
+    return "\n".join(lines) + "\n"
 
 def publicvpnlist_item_to_node(item: dict[str, Any], config_text: str) -> dict[str, Any]:
     ip = str(item.get("ip") or item.get("host") or "")
@@ -899,57 +974,194 @@ def publicvpnlist_item_to_node(item: dict[str, Any], config_text: str) -> dict[s
         "probed_at": 0,
     }
 
+def fetch_publicvpnlist_download_page(download_url: str) -> str:
+    try:
+        try:
+            return fetch_api_text(download_url, True, accept="text/html,*/*")
+        except Exception:
+            return fetch_api_text(download_url, False, accept="text/html,*/*")
+    except Exception as exc:
+        raise RuntimeError(f"download page fetch failed: {exc}") from exc
+
+
+def publicvpnlist_capture_download_link(download_url: str) -> tuple[str, str]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise RuntimeError(f"Playwright unavailable: {exc}") from exc
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 1200})
+        page.goto(download_url, wait_until="domcontentloaded", timeout=120000)
+        page.wait_for_timeout(1200)
+
+        def click_detail_button(selector: str) -> bool:
+            locator = page.locator(selector)
+            if locator.count() == 0:
+                return False
+            node = locator.first
+            try:
+                node.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+            try:
+                node.click(timeout=15000)
+                page.wait_for_timeout(2500)
+                return True
+            except Exception:
+                try:
+                    node.evaluate("el => el.click()")
+                    page.wait_for_timeout(2500)
+                    return True
+                except Exception:
+                    return False
+
+        click_detail_button("#downloadCurrentCheckBtn")
+        click_detail_button("#dlStart")
+
+        ready_link = page.locator("#dlReadyLink")
+        href = ""
+        if ready_link.count():
+            try:
+                href = (ready_link.first.get_attribute("href") or "").strip()
+            except Exception:
+                href = ""
+        body_text = page.locator("body").inner_text()
+        browser.close()
+
+    if href and href != "#" and not href.startswith("javascript:"):
+        return urllib.parse.urljoin(download_url, href), body_text
+    return "", body_text
+
+def extract_publicvpnlist_download_target(download_url: str, text: str) -> str:
+    ready_match = re.search(r'<a[^>]+id\s*=\s*["\']dlReadyLink["\'][^>]+href\s*=\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
+    if ready_match:
+        href = html.unescape(ready_match.group(1)).strip()
+        if href and href != "#" and not href.startswith("javascript:"):
+            return urllib.parse.urljoin(download_url, href)
+
+    token_match = re.search(r'/download\.php\?token=[^"\'\s>]+', text, re.IGNORECASE)
+    if token_match:
+        return urllib.parse.urljoin(download_url, token_match.group(0))
+
+    form_match = re.search(r'<form[^>]+action\s*=\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
+    if form_match:
+        action = html.unescape(form_match.group(1)).strip()
+        if action and action != "#" and not action.startswith("javascript:"):
+            return urllib.parse.urljoin(download_url, action)
+
+    return ""
+
+
 def fetch_publicvpnlist_candidates(seen_ips: set[str], blacklist: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    if not PUBLICVPNLIST_ENABLED:
-        return []
+    candidates: list[dict[str, Any]] = []
     source_urls = publicvpnlist_source_urls()
     if not source_urls:
-        return []
-    candidates: list[dict[str, Any]] = []
-    log_to_json("INFO", "Main", f"开始拉取 PublicVPNList 节点来源: {', '.join(source_urls)}")
+        return candidates
+
+    downloaded = 0
+    download_root = CONFIG_DIR / "publicvpnlist_downloads"
+    download_root.mkdir(parents=True, exist_ok=True)
     for source_url in source_urls:
-        if len(candidates) >= PUBLICVPNLIST_MAX_DOWNLOADS:
+        if PUBLICVPNLIST_MAX_DOWNLOADS > 0 and downloaded >= PUBLICVPNLIST_MAX_DOWNLOADS:
             break
         try:
-            try:
-                source_text = fetch_api_text(source_url, True, accept="text/html,*/*")
-            except Exception as first_exc:
-                print(f"[PublicVPNList] HTTPS 证书验证获取失败，尝试不验证证书: {first_exc}", flush=True)
-                source_text = fetch_api_text(source_url, False, accept="text/html,*/*")
-            items = extract_publicvpnlist_items(source_url, source_text)
-            print(f"[PublicVPNList] {source_url} 过滤后候选 {len(items)} 个", flush=True)
-            for item in items:
-                if len(candidates) >= PUBLICVPNLIST_MAX_DOWNLOADS:
-                    break
-                ip = str(item.get("ip") or item.get("host") or "")
-                if not ip or ip in seen_ips:
-                    continue
-                download_url = str(item.get("download_url") or "")
-                if not download_url:
-                    continue
-                try:
-                    try:
-                        config_text = fetch_api_text(download_url, True, accept="application/x-openvpn-profile,text/plain,*/*")
-                    except Exception:
-                        config_text = fetch_api_text(download_url, False, accept="application/x-openvpn-profile,text/plain,*/*")
-                    if not looks_like_openvpn_config(config_text):
-                        print(f"[PublicVPNList] 跳过非 OpenVPN 配置: {download_url}", flush=True)
-                        continue
-                    node = publicvpnlist_item_to_node(item, config_text)
-                except Exception as row_exc:
-                    print(f"[PublicVPNList] 跳过损坏的节点 {download_url}: {row_exc}", flush=True)
-                    log_to_json("WARNING", "Main", f"跳过损坏的 PublicVPNList 节点 {download_url}: {row_exc}")
-                    continue
-                entry = blacklist.get(node["id"])
-                if entry and float(entry.get("until", 0) or 0) > time.time():
-                    continue
-                candidates.append(node)
-                seen_ips.add(ip)
+            page_text = fetch_publicvpnlist_page_html(source_url)
         except Exception as exc:
-            print(f"[PublicVPNList] 拉取失败 {source_url}: {exc}", flush=True)
-            log_to_json("WARNING", "Main", f"PublicVPNList 拉取失败 {source_url}: {exc}")
-    log_to_json("INFO", "Main", f"PublicVPNList 成功获取 {len(candidates)} 个候选节点")
+            print(f"[PublicVPNList] 拉取国家页面失败 {source_url}: {exc}", flush=True)
+            log_to_json("WARNING", "Main", f"PublicVPNList 拉取国家页面失败 {source_url}: {exc}")
+            continue
+
+        items = extract_publicvpnlist_items(source_url, page_text)
+        print(f"[PublicVPNList] {source_url} 解析到 {len(items)} 个候选条目", flush=True)
+        for item in items:
+            if PUBLICVPNLIST_MAX_DOWNLOADS > 0 and downloaded >= PUBLICVPNLIST_MAX_DOWNLOADS:
+                break
+            if not item.get("reachable", True):
+                continue
+            ip = str(item.get("ip") or "")
+            if not ip or ip in seen_ips:
+                continue
+            download_url = str(item.get("download_url") or "")
+            if not download_url:
+                continue
+            try:
+                config_text = fetch_publicvpnlist_ovpn_config(download_url, page_text)
+                if not config_text and not PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD:
+                    config_text = build_publicvpnlist_ovpn(item)
+                ok, reason = publicvpnlist_config_matches_item(item, config_text)
+                if not ok:
+                    print(f"[PublicVPNList] 跳过条目 {item.get('id', '')}: {reason}", flush=True)
+                    log_to_json("WARNING", "Main", f"PublicVPNList 跳过条目 {item.get('id', '')}: {reason}")
+                    continue
+                node = publicvpnlist_item_to_node(item, config_text)
+                config_path = download_root / f"{node['id']}.ovpn"
+                config_path.write_text(config_text, encoding="utf-8")
+                node["config_path"] = str(config_path)
+            except Exception as exc:
+                print(f"[PublicVPNList] 跳过条目 {item.get('id', '')}: {exc}", flush=True)
+                log_to_json("WARNING", "Main", f"PublicVPNList 跳过条目 {item.get('id', '')}: {exc}")
+                continue
+
+            entry = blacklist.get(node["id"])
+            if entry and float(entry.get("until", 0) or 0) > time.time():
+                continue
+            candidates.append(node)
+            seen_ips.add(ip)
+            downloaded += 1
+            print(f"[PublicVPNList] 已保存 {node['id']} -> {node.get('config_path', '')}", flush=True)
+
+        if PUBLICVPNLIST_MAX_DOWNLOADS > 0 and downloaded >= PUBLICVPNLIST_MAX_DOWNLOADS:
+            break
+
     return candidates
+
+
+def publicvpnlist_prepare_download_page(download_url: str) -> str:
+    page = fetch_publicvpnlist_download_page(download_url)
+    lowered = page.lower()
+    if "we could not confirm that this server is currently reachable" in lowered:
+        return ""
+    return page
+
+def fetch_publicvpnlist_ovpn_config(download_url: str, text: str) -> str:
+    target = extract_publicvpnlist_download_target(download_url, text)
+    if target:
+        try:
+            try:
+                return fetch_api_text(target, True, accept="application/x-openvpn-profile,text/plain,*/*")
+            except Exception:
+                return fetch_api_text(target, False, accept="application/x-openvpn-profile,text/plain,*/*")
+        except Exception:
+            pass
+
+    page = publicvpnlist_prepare_download_page(download_url)
+    if not page:
+        return ""
+
+    target = extract_publicvpnlist_download_target(download_url, page)
+    if target:
+        try:
+            try:
+                return fetch_api_text(target, True, accept="application/x-openvpn-profile,text/plain,*/*")
+            except Exception:
+                return fetch_api_text(target, False, accept="application/x-openvpn-profile,text/plain,*/*")
+        except Exception:
+            pass
+
+    alt_target, alt_body = publicvpnlist_capture_download_link(download_url)
+    if not alt_target:
+        return ""
+    if alt_body and "we could not confirm that this server is currently reachable" in alt_body.lower():
+        return ""
+    try:
+        try:
+            return fetch_api_text(alt_target, True, accept="application/x-openvpn-profile,text/plain,*/*")
+        except Exception:
+            return fetch_api_text(alt_target, False, accept="application/x-openvpn-profile,text/plain,*/*")
+    except Exception:
+        return ""
 
 def load_blacklist() -> dict[str, dict[str, Any]]:
     now = time.time()

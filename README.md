@@ -94,7 +94,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/youshang8520/aimili-vpngate/ma
   - **实时滚动与管理**：日志实时滚动加载，支持一键复制代码、一键导出 `.log` 日志文件到本地。
 
 #### PublicVPNList 附加来源配置
-PublicVPNList 默认作为额外来源启用。默认配置不会固定某一个国家；当 `PUBLICVPNLIST_SOURCES` 留空且 `PUBLICVPNLIST_AUTO_COUNTRIES=1` 时，程序会先从 PublicVPNList 首页自动发现 `/country/.../` 国家页，再解析每个国家页中的 `data-id`、`data-country`、`data-country-name`、`data-host`、`data-ip`、`data-speed`、`data-latency`、`data-port`、`data-proto`、`data-checked-at`，并读取页面里的 Technical score 后再下载 `/download/{data-id}/` 对应 `.ovpn` 配置。
+PublicVPNList 默认作为额外来源启用。默认配置不会固定某一个国家；当 `PUBLICVPNLIST_SOURCES` 留空且 `PUBLICVPNLIST_AUTO_COUNTRIES=1` 时，程序会先从 PublicVPNList 首页自动发现 `/country/.../` 国家页，再解析每个国家页中的 `data-id`、`data-country`、`data-country-name`、`data-host`、`data-ip`、`data-speed`、`data-latency`、`data-port`、`data-proto`、`data-checked-at`，并读取页面里的 Technical score。正式链路会进入 `/download/{data-id}/` 详情页，只点击当前详情页的 `Run current check` / `Generate .ovpn link` 按钮，读取 `#dlReadyLink` 的一次性下载地址，下载 `.ovpn` 后强制校验配置内 `remote host port` 与当前条目 IP/端口一致，匹配后才接入 Aimili 节点池。
 
 可在 `/etc/default/aimilivpn` 中调整：
 ```bash
@@ -104,12 +104,14 @@ PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
 PUBLICVPNLIST_SOURCES=           # 留空表示自动发现所有国家页；也可手动填多个 URL，用逗号分隔
 PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 表示不限制国家页数量
 PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1  # 只接入真实下载且 remote 匹配的 .ovpn
 PUBLICVPNLIST_MIN_SPEED=0        # Mbps，0 表示不限制
 PUBLICVPNLIST_MAX_LATENCY=0      # ms，0 表示不限制
 PUBLICVPNLIST_MIN_SCORE=0        # Technical score，0 表示不限制
 PUBLICVPNLIST_PROTO=all          # all / tcp / udp
+OPENVPN_CMD=/usr/local/sbin/openvpn24-compat
 ```
-修改后执行 `ml restart` 生效。Technical score 是 PublicVPNList 的技术质量分，不等同于隐私或风控绝对保证。
+修改后执行 `ml restart` 生效。安装器会在 `/opt/aimilivpn/.venv` 中安装 Python 依赖，并安装 Playwright Chromium，用于执行 PublicVPNList 真实点击下载链路。Technical score 是 PublicVPNList 的技术质量分，不等同于隐私或风控绝对保证。
 
 ---
 
@@ -223,7 +225,7 @@ To prevent unauthorized scanning and abuse of the proxy port on the public inter
 > 💡 **Quick Note**: If you really need to open this proxy port to the public internet, you can set the environment variable `export LOCAL_PROXY_HOST="::"` before running the manager.
 
 ### PublicVPNList Additional Source
-PublicVPNList is enabled as an extra source by default. The manager parses country-page row fields such as `data-id`, `data-country`, `data-country-name`, `data-host`, `data-ip`, `data-speed`, `data-latency`, `data-port`, `data-proto`, and `data-checked-at`, reads the visible Technical score, then downloads the matching `/download/{data-id}/` `.ovpn` profile.
+PublicVPNList is enabled as an extra source by default. The manager parses country-page row fields such as `data-id`, `data-country`, `data-country-name`, `data-host`, `data-ip`, `data-speed`, `data-latency`, `data-port`, `data-proto`, and `data-checked-at`, reads the visible Technical score, opens the matching `/download/{data-id}/` detail page, clicks only the current detail page's `Run current check` / `Generate .ovpn link` buttons, reads the one-time `#dlReadyLink`, downloads the `.ovpn` profile, and only accepts it when the profile's `remote host port` matches the current row.
 
 Configure it in `/etc/default/aimilivpn`:
 ```bash
@@ -233,12 +235,13 @@ PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
 PUBLICVPNLIST_SOURCES=           # empty = auto-discover all country pages; or set comma-separated URLs manually
 PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 disables the country-page limit
 PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1  # accept only real downloaded .ovpn profiles whose remote matches the row
 PUBLICVPNLIST_MIN_SPEED=0        # Mbps; 0 disables the limit
 PUBLICVPNLIST_MAX_LATENCY=0      # ms; 0 disables the limit
 PUBLICVPNLIST_MIN_SCORE=0        # Technical score; 0 disables the limit
 PUBLICVPNLIST_PROTO=all          # all / tcp / udp
 ```
-Run `ml restart` after changing these values. Technical score is PublicVPNList's technical quality score, not an absolute privacy or risk guarantee.
+Run `ml restart` after changing these values. The installer creates `/opt/aimilivpn/.venv`, installs the Python dependencies, and installs Playwright Chromium for the real PublicVPNList click-and-download flow. Technical score is PublicVPNList's technical quality score, not an absolute privacy or risk guarantee.
 
 ---
 

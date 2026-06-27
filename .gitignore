@@ -60,6 +60,18 @@ scratch/
 test_*.py
 *.bak
 *.orig
+node_modules/
+package-lock.json
+package.json
+publicvpn_*.json
+publicvpn*_capture*.json
+publicvpn*_download*.json
+publicvpnlist_click_watch.json
+publicvpnlist_click_watch.py
+publicvpnlist_ip_list.txt
+publicvpnlist_usa_downloads.*
+publicvpnlist_downloads*/
+patch_publicvpn.py
 
 # ---- 系统文件 ----
 .DS_Store

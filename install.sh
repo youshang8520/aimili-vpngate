@@ -99,18 +99,46 @@ prepare_source_snapshot() {
     return 1
 }
 
+setup_python_runtime() {
+    venv_dir="${INSTALL_DIR}/.venv"
+    echo -e "  -> 正在创建 Python 虚拟环境 ${venv_dir} ..."
+    rm -rf "$venv_dir"
+    python3 -m venv "$venv_dir"
+    "${venv_dir}/bin/python" -m pip install --upgrade pip wheel
+    if [ -f "${INSTALL_DIR}/requirements.txt" ]; then
+        "${venv_dir}/bin/python" -m pip install -r "${INSTALL_DIR}/requirements.txt"
+    else
+        "${venv_dir}/bin/python" -m pip install 'playwright>=1.45.0,<2'
+    fi
+    echo -e "  -> 正在安装 Playwright Chromium，用于 PublicVPNList 真实交互下载链路 ..."
+    if ! "${venv_dir}/bin/python" -m playwright install --with-deps chromium; then
+        echo -e "${YELLOW}  -> Playwright 依赖自动安装未完全成功，正在尝试仅安装 Chromium 浏览器包。${PLAIN}"
+        "${venv_dir}/bin/python" -m playwright install chromium
+    fi
+}
+
+ensure_env_line() {
+    env_file="$1"
+    key="$2"
+    value="$3"
+    if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+        echo "${key}=${value}" >> "$env_file"
+        echo -e "  -> 已补充 ${key}=${value} 到 ${env_file}"
+    fi
+}
+
 echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
 if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
     apt-get update -q || true
     echo -e "  -> 正在运行 apt-get install 安装基础依赖包..."
-    apt-get install -y openvpn curl ca-certificates iptables iproute2 psmisc python3
+    apt-get install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-venv
 elif [ "$PKG_MGR" = "apk" ]; then
     echo -e "  -> 正在运行 apk update 更新软件源清单..."
     apk update || true
     echo -e "  -> 正在运行 apk add 安装基础依赖包..."
     # bash is required for this script itself and some internal logic
-    apk add openvpn curl ca-certificates iptables iproute2 psmisc python3 bash
+    apk add openvpn curl ca-certificates iptables iproute2 psmisc python3 py3-pip py3-virtualenv bash
 elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     echo -e "  -> 正在运行 $PKG_MGR 安装基础依赖包..."
     if [ "$OS_TYPE" != "fedora" ] && [ "$OS_TYPE" != "amzn" ]; then
@@ -118,8 +146,9 @@ elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
         $PKG_MGR install -y epel-release || true
     fi
     # Try installing packages. Note: iproute or iproute2
-    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute psmisc python3 || \
-    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3
+    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute psmisc python3 python3-pip python3-virtualenv || \
+    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-virtualenv || \
+    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip
 fi
 
 echo -e "\n${YELLOW}[2/4] 正在下载最新源码快照到 ${INSTALL_DIR} ...${PLAIN}"
@@ -132,6 +161,7 @@ fi
 SNAPSHOT_ROOT=$(find "$STAGING_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 deploy_snapshot "$SNAPSHOT_ROOT"
 rm -rf "$STAGING_DIR"
+setup_python_runtime
 
 # 5. Configure Service
 echo -e "\n${YELLOW}[3/4] 正在配置系统服务...${PLAIN}"
@@ -147,14 +177,18 @@ PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
 PUBLICVPNLIST_SOURCES=
 PUBLICVPNLIST_MAX_COUNTRIES=0
 PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1
 PUBLICVPNLIST_MIN_SPEED=0
 PUBLICVPNLIST_MAX_LATENCY=0
 PUBLICVPNLIST_MIN_SCORE=0
 PUBLICVPNLIST_PROTO=all
+OPENVPN_CMD=/usr/local/sbin/openvpn24-compat
 EOF
 else
     echo -e "  -> 检测到已有 /etc/default/aimilivpn，保留用户现有环境配置。"
 fi
+ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD 1
+ensure_env_line /etc/default/aimilivpn OPENVPN_CMD /usr/local/sbin/openvpn24-compat
 if command -v systemctl >/dev/null 2>&1; then
     echo -e "  -> 检测到 systemd，正在创建服务配置 /lib/systemd/system/aimilivpn.service ..."
     cat > /lib/systemd/system/aimilivpn.service <<EOF
@@ -165,7 +199,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=/usr/bin/python3 vpngate_manager.py
+ExecStart=${INSTALL_DIR}/.venv/bin/python vpngate_manager.py
 Restart=always
 RestartSec=5
 EnvironmentFile=-/etc/default/aimilivpn
@@ -181,7 +215,7 @@ elif command -v rc-service >/dev/null 2>&1; then
 #!/sbin/openrc-run
 
 description="AimiliVPN OpenVPN Manager with HTTP/SOCKS5 Proxy"
-command="/usr/bin/python3"
+command="${INSTALL_DIR}/.venv/bin/python"
 command_args="${INSTALL_DIR}/vpngate_manager.py"
 command_background="yes"
 directory="${INSTALL_DIR}"
