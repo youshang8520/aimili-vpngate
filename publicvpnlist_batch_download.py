@@ -20,6 +20,7 @@ OUT_DIR = Path(os.environ.get("PUBLICVPNLIST_BATCH_DIR", "publicvpnlist_download
 JSON_OUT = Path(os.environ.get("PUBLICVPNLIST_BATCH_JSON", "publicvpnlist_usa_downloads.json")).resolve()
 CSV_OUT = Path(os.environ.get("PUBLICVPNLIST_BATCH_CSV", "publicvpnlist_usa_downloads.csv")).resolve()
 MAX_DOWNLOADS = int(os.environ.get("PUBLICVPNLIST_BATCH_MAX", "0") or "0")
+PER_COUNTRY_LIMIT = int(os.environ.get("PUBLICVPNLIST_PER_COUNTRY_LIMIT", "20") or "0")
 REACHABILITY_WARNING = "We could not confirm that this server is currently reachable"
 PREFERRED_DETAIL_BUTTONS = (
     ("#downloadCurrentCheckBtn", "Run current check"),
@@ -100,12 +101,14 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     page_text = manager.fetch_publicvpnlist_page_html(COUNTRY_URL)
     items = manager.extract_publicvpnlist_items(COUNTRY_URL, page_text)
+    if PER_COUNTRY_LIMIT > 0:
+        items = items[:PER_COUNTRY_LIMIT]
     if MAX_DOWNLOADS > 0:
         items = items[:MAX_DOWNLOADS]
 
     results: list[dict[str, object]] = []
     successes: list[dict[str, object]] = []
-    print(f"[PublicVPNList batch] {COUNTRY_URL} parsed={len(items)} max={MAX_DOWNLOADS or 'all'}", flush=True)
+    print(f"[PublicVPNList batch] {COUNTRY_URL} selected={len(items)} per_country_limit={PER_COUNTRY_LIMIT or 'all'} max={MAX_DOWNLOADS or 'all'}", flush=True)
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)

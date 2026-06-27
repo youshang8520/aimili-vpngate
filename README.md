@@ -102,16 +102,21 @@ PUBLICVPNLIST_ENABLED=1
 PUBLICVPNLIST_AUTO_COUNTRIES=1
 PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
 PUBLICVPNLIST_SOURCES=           # 留空表示自动发现所有国家页；也可手动填多个 URL，用逗号分隔
-PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 表示不限制国家页数量
-PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 表示不限制国家页数量，默认自动发现所有国家
+PUBLICVPNLIST_PER_COUNTRY_LIMIT=20 # 每个国家按 Speed/Latency 选前 20 个；不足 20 个则全部使用
+PUBLICVPNLIST_MAX_DOWNLOADS=0    # 0 表示不限制总下载数
 PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1  # 只接入真实下载且 remote 匹配的 .ovpn
 PUBLICVPNLIST_MIN_SPEED=0        # Mbps，0 表示不限制
 PUBLICVPNLIST_MAX_LATENCY=0      # ms，0 表示不限制
 PUBLICVPNLIST_MIN_SCORE=0        # Technical score，0 表示不限制
 PUBLICVPNLIST_PROTO=all          # all / tcp / udp
+FETCH_INTERVAL_SECONDS=86400     # 号池未低水位时每天拉取一次最新 .ovpn
+CHECK_INTERVAL_SECONDS=86400
+LOW_POOL_RETRY_SECONDS=300       # 可用节点低于 TARGET_VALID_NODES 时 5 分钟后重新拉取补池
+TARGET_VALID_NODES=3
 OPENVPN_CMD=/usr/local/sbin/openvpn24-compat
 ```
-修改后执行 `ml restart` 生效。安装器会在 `/opt/aimilivpn/.venv` 中安装 Python 依赖，并安装 Playwright Chromium，用于执行 PublicVPNList 真实点击下载链路。Technical score 是 PublicVPNList 的技术质量分，不等同于隐私或风控绝对保证。
+修改后执行 `ml restart` 生效。安装器会在 `/opt/aimilivpn/.venv` 中安装 Python 依赖，并安装 Playwright Chromium，用于执行 PublicVPNList 真实点击下载链路。OpenVPN 配置会直接写入节点 `.ovpn` 文件并交给 `OPENVPN_CMD --config` 使用；连接失败、进程退出或本地代理健康检查失败时，当前 IP 会被标记不可用并自动切换到备用节点。若当前路由/国家范围内可用节点数低于 `TARGET_VALID_NODES=3`，守护线程会按 `LOW_POOL_RETRY_SECONDS` 重新拉取补池；未低水位时按 `FETCH_INTERVAL_SECONDS=86400` 每天拉取一次最新 `.ovpn`。重新拉取和每日刷新都不会删除已经验证可用的 IP；只有某个 IP 后续被检测为不可用，才会从号池中被淘汰。Technical score 是 PublicVPNList 的技术质量分，不等同于隐私或风控绝对保证。
 
 ---
 
@@ -233,15 +238,20 @@ PUBLICVPNLIST_ENABLED=1
 PUBLICVPNLIST_AUTO_COUNTRIES=1
 PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
 PUBLICVPNLIST_SOURCES=           # empty = auto-discover all country pages; or set comma-separated URLs manually
-PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 disables the country-page limit
-PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_MAX_COUNTRIES=0    # 0 auto-discovers all countries
+PUBLICVPNLIST_PER_COUNTRY_LIMIT=20 # top 20 per country by Speed/Latency; use all if fewer than 20
+PUBLICVPNLIST_MAX_DOWNLOADS=0    # 0 disables the global download limit
 PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1  # accept only real downloaded .ovpn profiles whose remote matches the row
 PUBLICVPNLIST_MIN_SPEED=0        # Mbps; 0 disables the limit
 PUBLICVPNLIST_MAX_LATENCY=0      # ms; 0 disables the limit
 PUBLICVPNLIST_MIN_SCORE=0        # Technical score; 0 disables the limit
 PUBLICVPNLIST_PROTO=all          # all / tcp / udp
+FETCH_INTERVAL_SECONDS=86400     # refresh latest .ovpn files once per day when the pool is healthy
+CHECK_INTERVAL_SECONDS=86400
+LOW_POOL_RETRY_SECONDS=300       # refresh again after 5 minutes when available nodes drop below TARGET_VALID_NODES
+TARGET_VALID_NODES=3
 ```
-Run `ml restart` after changing these values. The installer creates `/opt/aimilivpn/.venv`, installs the Python dependencies, and installs Playwright Chromium for the real PublicVPNList click-and-download flow. Technical score is PublicVPNList's technical quality score, not an absolute privacy or risk guarantee.
+Run `ml restart` after changing these values. The installer creates `/opt/aimilivpn/.venv`, installs the Python dependencies, and installs Playwright Chromium for the real PublicVPNList click-and-download flow. Downloaded profiles are written as node `.ovpn` files and passed directly to `OPENVPN_CMD --config`. If a connection fails, the OpenVPN process exits, or the local proxy health check fails, the active IP is marked unavailable and the manager automatically switches to a backup node. When available nodes in the current routing/country scope fall below `TARGET_VALID_NODES=3`, the daemon refreshes the pool after `LOW_POOL_RETRY_SECONDS`; otherwise it refreshes latest `.ovpn` files daily through `FETCH_INTERVAL_SECONDS=86400`. Low-water refreshes and daily refreshes do not remove IPs that are already verified as available; an IP is removed from the pool only after it is later detected as unavailable. Technical score is PublicVPNList's technical quality score, not an absolute privacy or risk guarantee.
 
 ---
 

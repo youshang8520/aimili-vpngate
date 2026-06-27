@@ -134,7 +134,8 @@ PUBLICVPNLIST_SOURCES = [
     u.strip() for u in os.environ.get("PUBLICVPNLIST_SOURCES", "").split(",") if u.strip()
 ]
 PUBLICVPNLIST_MAX_COUNTRIES = env_int("PUBLICVPNLIST_MAX_COUNTRIES", 0, 0)
-PUBLICVPNLIST_MAX_DOWNLOADS = env_int("PUBLICVPNLIST_MAX_DOWNLOADS", 30, 0)
+PUBLICVPNLIST_PER_COUNTRY_LIMIT = env_int("PUBLICVPNLIST_PER_COUNTRY_LIMIT", 20, 0)
+PUBLICVPNLIST_MAX_DOWNLOADS = env_int("PUBLICVPNLIST_MAX_DOWNLOADS", 0, 0)
 PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD = os.environ.get("PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD", "1") == "1"
 PUBLICVPNLIST_MIN_SPEED = env_float("PUBLICVPNLIST_MIN_SPEED", 0.0, 0.0)
 PUBLICVPNLIST_MAX_LATENCY = env_int("PUBLICVPNLIST_MAX_LATENCY", 0, 0)
@@ -143,8 +144,9 @@ PUBLICVPNLIST_PROTO = os.environ.get("PUBLICVPNLIST_PROTO", "all").strip().lower
 if PUBLICVPNLIST_PROTO not in ("", "all", "tcp", "udp"):
     print(f"[配置警告] 环境变量 PUBLICVPNLIST_PROTO={PUBLICVPNLIST_PROTO!r} 无效，使用 all", flush=True)
     PUBLICVPNLIST_PROTO = "all"
-FETCH_INTERVAL_SECONDS = env_int("FETCH_INTERVAL_SECONDS", 1260, 1)
-CHECK_INTERVAL_SECONDS = env_int("CHECK_INTERVAL_SECONDS", 1260, 1)
+FETCH_INTERVAL_SECONDS = env_int("FETCH_INTERVAL_SECONDS", 24 * 60 * 60, 1)
+CHECK_INTERVAL_SECONDS = env_int("CHECK_INTERVAL_SECONDS", FETCH_INTERVAL_SECONDS, 1)
+LOW_POOL_RETRY_SECONDS = env_int("LOW_POOL_RETRY_SECONDS", 5 * 60, 1)
 TARGET_VALID_NODES = env_int("TARGET_VALID_NODES", 3, 1)
 MAX_SCAN_ROWS = env_int("MAX_SCAN_ROWS", 300, 1)
 OPENVPN_TEST_TIMEOUT_SECONDS = env_int("OPENVPN_TEST_TIMEOUT_SECONDS", 35, 1)
@@ -399,6 +401,7 @@ def get_state() -> dict[str, Any]:
     state.setdefault("target_valid_nodes", TARGET_VALID_NODES)
     state.setdefault("fetch_interval_seconds", FETCH_INTERVAL_SECONDS)
     state.setdefault("check_interval_seconds", CHECK_INTERVAL_SECONDS)
+    state.setdefault("low_pool_retry_seconds", LOW_POOL_RETRY_SECONDS)
     _proxy_display = f"[{LOCAL_PROXY_HOST}]" if ":" in LOCAL_PROXY_HOST else LOCAL_PROXY_HOST
     state["local_proxy"] = f"http://{_proxy_display}:{LOCAL_PROXY_PORT}"
     state.setdefault("last_fetch_status", "not_started")
@@ -759,6 +762,7 @@ def publicvpnlist_filter_summary() -> dict[str, Any]:
         "country_index_url": PUBLICVPNLIST_COUNTRY_INDEX_URL,
         "sources": PUBLICVPNLIST_SOURCES,
         "max_countries": PUBLICVPNLIST_MAX_COUNTRIES,
+        "per_country_limit": PUBLICVPNLIST_PER_COUNTRY_LIMIT,
         "max_downloads": PUBLICVPNLIST_MAX_DOWNLOADS,
         "require_real_download": PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD,
         "min_speed_mbps": PUBLICVPNLIST_MIN_SPEED,
@@ -854,7 +858,7 @@ def extract_publicvpnlist_items(source_url: str, text: str) -> list[dict[str, An
         }
         if publicvpnlist_item_allowed(item):
             items.append(item)
-    items.sort(key=lambda item: (-parse_int(item.get("score")), -parse_float(item.get("speed")), parse_int(item.get("latency")) or 999999))
+    items.sort(key=lambda item: (-parse_float(item.get("speed")), parse_int(item.get("latency")) or 999999, -parse_int(item.get("score"))))
     return items
 
 def looks_like_openvpn_config(text: str) -> bool:
@@ -1074,7 +1078,10 @@ def fetch_publicvpnlist_candidates(seen_ips: set[str], blacklist: dict[str, dict
             continue
 
         items = extract_publicvpnlist_items(source_url, page_text)
-        print(f"[PublicVPNList] {source_url} 解析到 {len(items)} 个候选条目", flush=True)
+        total_items = len(items)
+        if PUBLICVPNLIST_PER_COUNTRY_LIMIT > 0:
+            items = items[:PUBLICVPNLIST_PER_COUNTRY_LIMIT]
+        print(f"[PublicVPNList] {source_url} 解析到 {total_items} 个候选条目，按速度/延迟选取 {len(items)} 个", flush=True)
         for item in items:
             if PUBLICVPNLIST_MAX_DOWNLOADS > 0 and downloaded >= PUBLICVPNLIST_MAX_DOWNLOADS:
                 break
@@ -2288,36 +2295,72 @@ def maintain_valid_nodes(force: bool = False) -> str:
             if active_openvpn_node_id:
                 active_node = next((n for n in current_nodes if n.get("id") == active_openvpn_node_id), None)
                 
+            def node_ip_key(node: dict[str, Any]) -> str:
+                return str(node.get("ip") or node.get("remote_host") or "").strip()
+
+            current_by_ip = {
+                node_ip_key(n): n
+                for n in current_nodes
+                if node_ip_key(n)
+            }
+            preserve_keys = [
+                "probe_status",
+                "probe_message",
+                "latency_ms",
+                "probed_at",
+                "owner",
+                "asn",
+                "as_name",
+                "location",
+                "ip_type",
+                "quality",
+            ]
             merged: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
-            
+            seen_node_ips: set[str] = set()
+
+            def add_merged(node: dict[str, Any]) -> bool:
+                node_id = str(node.get("id") or "")
+                node_ip = node_ip_key(node)
+                if not node_id:
+                    return False
+                if node_id in seen_ids or (node_ip and node_ip in seen_node_ips):
+                    return False
+                merged.append(node)
+                seen_ids.add(node_id)
+                if node_ip:
+                    seen_node_ips.add(node_ip)
+                return True
+
             if active_node:
-                merged.append(active_node)
-                seen_ids.add(active_node["id"])
-                
+                add_merged(active_node)
+
             for cand in candidates:
-                if cand["id"] not in seen_ids:
-                    previous = current_by_id.get(str(cand["id"]))
-                    if previous:
-                        for key in [
-                            "probe_status",
-                            "probe_message",
-                            "latency_ms",
-                            "probed_at",
-                            "owner",
-                            "asn",
-                            "as_name",
-                            "location",
-                            "ip_type",
-                            "quality",
-                        ]:
-                            if previous.get(key) not in (None, ""):
-                                cand[key] = previous.get(key)
-                    merged.append(cand)
-                    seen_ids.add(cand["id"])
-                    
+                cand_ip = node_ip_key(cand)
+                if str(cand.get("id") or "") in seen_ids or (cand_ip and cand_ip in seen_node_ips):
+                    continue
+                previous = current_by_id.get(str(cand.get("id") or "")) or current_by_ip.get(cand_ip)
+                if previous:
+                    for key in preserve_keys:
+                        if previous.get(key) not in (None, ""):
+                            cand[key] = previous.get(key)
+                add_merged(cand)
+
+            # 低水位补池或每日刷新时，不移除已经验证可用的节点；
+            # 如果新一轮列表没有包含这些 IP，仍保留它们作为备用池。
+            for existing in current_nodes:
+                if existing.get("active") or existing.get("probe_status") == "available":
+                    add_merged(existing)
+
             if len(merged) > 1000:
-                merged = merged[:1000]
+                protected = [n for n in merged if n.get("active") or n.get("probe_status") == "available"]
+                protected_ids = {str(n.get("id") or "") for n in protected}
+                protected_ips = {node_ip_key(n) for n in protected if node_ip_key(n)}
+                rest = [
+                    n for n in merged
+                    if str(n.get("id") or "") not in protected_ids and node_ip_key(n) not in protected_ips
+                ]
+                merged = protected + rest[:max(0, 1000 - len(protected))]
                 
             for n in merged:
                 config_path = Path(n["config_file"])
@@ -2450,6 +2493,15 @@ def maintain_valid_nodes(force: bool = False) -> str:
         maintenance_lock.release()
 
 
+def available_node_count() -> int:
+    try:
+        nodes = [n for n in read_nodes() if n.get("probe_status") == "available"]
+        nodes = apply_routing_filters(nodes, load_ui_config())
+        return len(nodes)
+    except Exception:
+        return 0
+
+
 def collector_loop() -> None:
     global last_collector_heartbeat
     while True:
@@ -2468,11 +2520,17 @@ def collector_loop() -> None:
             log_to_json("ERROR", "Main", err_msg)
             set_state(last_check_at=time.time(), last_check_message=f"check error: {exc}")
             
+        valid_count = available_node_count()
         if not active_openvpn_running() and not success:
             sleep_time = 30
+        elif valid_count < TARGET_VALID_NODES:
+            sleep_time = LOW_POOL_RETRY_SECONDS
+            msg = f"可用节点数 {valid_count} 低于目标 {TARGET_VALID_NODES}，将在 {sleep_time} 秒后重新拉取并补齐号池"
+            print(f"[低水位补池] {msg}", flush=True)
+            log_to_json("INFO", "Main", msg)
         else:
             sleep_time = CHECK_INTERVAL_SECONDS
-            
+
         time.sleep(sleep_time)
 
 LOGIN_HTML = r"""<!DOCTYPE html>
@@ -6316,6 +6374,7 @@ def main() -> None:
             "target_valid_nodes": TARGET_VALID_NODES,
             "fetch_interval_seconds": FETCH_INTERVAL_SECONDS,
             "check_interval_seconds": CHECK_INTERVAL_SECONDS,
+            "low_pool_retry_seconds": LOW_POOL_RETRY_SECONDS,
             "local_proxy": f"http://{'[' + LOCAL_PROXY_HOST + ']' if ':' in LOCAL_PROXY_HOST else LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}",
             "active_openvpn_node_id": "",
             "last_fetch_status": "starting",

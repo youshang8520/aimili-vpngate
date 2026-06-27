@@ -88,3 +88,8 @@
 - 已新增 `requirements.txt` 并更新 `install.sh`：安装时创建 `/opt/aimilivpn/.venv`，安装 Python Playwright 与 Chromium；systemd/OpenRC 服务均改用 venv Python 启动，确保 Linux 服务器正式运行时能执行 PublicVPNList 真实交互下载链路。
 - 已更新 README 中英文文档，说明真实点击下载链路、`PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1` 与 Playwright/Chromium 安装行为。
 - 发布前校验：`python -m py_compile vpngate_manager.py publicvpnlist_capture.py publicvpnlist_batch_download.py` 通过；`bash -n install.sh` 通过；发布版批量脚本按 USA 前 8 个条目验证，真实下载并 remote 匹配成功 3 个，其余为站点实时检查不可达。
+- 已确认下载下来的 `.ovpn` 可直接作为 OpenVPN 配置使用：生产连接流程会把节点 `config_text` 写入 `.ovpn` 文件，并通过 `OPENVPN_CMD --config <file>` 启动 OpenVPN。
+- 已确认 PublicVPNList 来源不是固定 USA：`PUBLICVPNLIST_SOURCES` 留空且 `PUBLICVPNLIST_AUTO_COUNTRIES=1` 时会从 `PUBLICVPNLIST_COUNTRY_INDEX_URL` 自动发现所有 `/country/.../` 国家页；手动配置 `PUBLICVPNLIST_SOURCES` 时可指定一个或多个国家页。
+- 已把默认 PublicVPNList 拉取策略改为全国家：`PUBLICVPNLIST_MAX_DOWNLOADS=0` 表示不限制总下载数，新增 `PUBLICVPNLIST_PER_COUNTRY_LIMIT=20`，每个国家页按 Speed Mbps 降序、Latency ms 升序、Technical score 降序排序后最多取 20 个，不足 20 个全部使用。
+- 已把默认调度改为号池健康时每日刷新：`FETCH_INTERVAL_SECONDS=86400`、`CHECK_INTERVAL_SECONDS=86400`；若当前路由/国家范围内可用节点低于 `TARGET_VALID_NODES=3`，按 `LOW_POOL_RETRY_SECONDS=300` 重新拉取补池。
+- 已按用户要求修正刷新/补池合并规则：重新拉取和每天定时刷新都不会删除已经验证可用的 IP；只有某个 IP 后续被检测为不可用，才会在后续合并中被淘汰；同时号池合并按 IP 去重，避免重复 IP。

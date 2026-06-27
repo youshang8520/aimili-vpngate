@@ -127,6 +127,17 @@ ensure_env_line() {
     fi
 }
 
+update_env_default_line() {
+    env_file="$1"
+    key="$2"
+    old_value="$3"
+    new_value="$4"
+    if grep -q "^${key}=${old_value}$" "$env_file" 2>/dev/null; then
+        sed -i "s|^${key}=${old_value}$|${key}=${new_value}|" "$env_file"
+        echo -e "  -> 已将旧默认 ${key}=${old_value} 升级为 ${key}=${new_value}"
+    fi
+}
+
 echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
 if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
@@ -176,18 +187,30 @@ PUBLICVPNLIST_AUTO_COUNTRIES=1
 PUBLICVPNLIST_COUNTRY_INDEX_URL=https://publicvpnlist.com/
 PUBLICVPNLIST_SOURCES=
 PUBLICVPNLIST_MAX_COUNTRIES=0
-PUBLICVPNLIST_MAX_DOWNLOADS=30
+PUBLICVPNLIST_PER_COUNTRY_LIMIT=20
+PUBLICVPNLIST_MAX_DOWNLOADS=0
 PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD=1
 PUBLICVPNLIST_MIN_SPEED=0
 PUBLICVPNLIST_MAX_LATENCY=0
 PUBLICVPNLIST_MIN_SCORE=0
 PUBLICVPNLIST_PROTO=all
+FETCH_INTERVAL_SECONDS=86400
+CHECK_INTERVAL_SECONDS=86400
+LOW_POOL_RETRY_SECONDS=300
+TARGET_VALID_NODES=3
 OPENVPN_CMD=/usr/local/sbin/openvpn24-compat
 EOF
 else
     echo -e "  -> 检测到已有 /etc/default/aimilivpn，保留用户现有环境配置。"
 fi
+update_env_default_line /etc/default/aimilivpn PUBLICVPNLIST_MAX_DOWNLOADS 30 0
+ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_PER_COUNTRY_LIMIT 20
+ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_MAX_DOWNLOADS 0
 ensure_env_line /etc/default/aimilivpn PUBLICVPNLIST_REQUIRE_REAL_DOWNLOAD 1
+ensure_env_line /etc/default/aimilivpn FETCH_INTERVAL_SECONDS 86400
+ensure_env_line /etc/default/aimilivpn CHECK_INTERVAL_SECONDS 86400
+ensure_env_line /etc/default/aimilivpn LOW_POOL_RETRY_SECONDS 300
+ensure_env_line /etc/default/aimilivpn TARGET_VALID_NODES 3
 ensure_env_line /etc/default/aimilivpn OPENVPN_CMD /usr/local/sbin/openvpn24-compat
 if command -v systemctl >/dev/null 2>&1; then
     echo -e "  -> 检测到 systemd，正在创建服务配置 /lib/systemd/system/aimilivpn.service ..."
