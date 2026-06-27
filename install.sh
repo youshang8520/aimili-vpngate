@@ -78,6 +78,27 @@ copy_tree_preserve() {
     done
 }
 
+deploy_snapshot() {
+    src_root="$1"
+    mkdir -p "$INSTALL_DIR"
+    copy_tree_preserve "$src_root" "$INSTALL_DIR"
+    if [ -d "$INSTALL_DIR/openvpn-compat" ]; then
+        echo -e "  -> 保留现有 OpenVPN 兼容辅助目录 $INSTALL_DIR/openvpn-compat"
+    fi
+}
+
+prepare_source_snapshot() {
+    archive_url="$1"
+    staging_root="$2"
+    if command -v curl >/dev/null 2>&1; then
+        if curl -L --fail --retry 3 --connect-timeout 10 "$archive_url" -o "$staging_root/source.tar.gz"; then
+            tar -xzf "$staging_root/source.tar.gz" -C "$staging_root"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
 if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
@@ -104,15 +125,8 @@ fi
 echo -e "\n${YELLOW}[2/4] 正在下载最新源码快照到 ${INSTALL_DIR} ...${PLAIN}"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
-if command -v curl >/dev/null 2>&1; then
-    if curl -L --fail --retry 3 --connect-timeout 10 "$ARCHIVE_URL" -o "$STAGING_DIR/source.tar.gz"; then
-        tar -xzf "$STAGING_DIR/source.tar.gz" -C "$STAGING_DIR"
-    else
-        echo -e "${RED}  -> 错误: 无法下载源码快照 ${ARCHIVE_URL}${PLAIN}"
-        exit 1
-    fi
-else
-    echo -e "${RED}  -> 错误: 需要 curl 才能下载源码快照${PLAIN}"
+if ! prepare_source_snapshot "$ARCHIVE_URL" "$STAGING_DIR"; then
+    echo -e "${RED}  -> 错误: 无法下载源码快照 ${ARCHIVE_URL}${PLAIN}"
     exit 1
 fi
 SNAPSHOT_ROOT=$(find "$STAGING_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
@@ -530,54 +544,12 @@ def update_service():
     if os.path.exists(INSTALL_DIR):
         try:
             os.chdir(INSTALL_DIR)
-            if not os.path.exists(".git"):
-                print("错误: 当前安装目录不是 Git 仓库，无法通过 Git 更新。")
+            if os.path.exists(".git"):
+                print("检测到 Git 仓库，但当前安装流程已切换为源码快照部署。请重新运行 install.sh 获取最新版本。")
                 time.sleep(3)
                 return
-            
-            # Fetch remote origin updates
-            subprocess.run(["git", "fetch", "--all"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Detect remote branch (prefer current local branch, fallback to origin/main or origin/master)
-            curr = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
-            branch = curr.stdout.strip() if curr.returncode == 0 else ""
-            if not branch or branch == "HEAD":
-                branch = "main"
-                for b in ["main", "master"]:
-                    chk = subprocess.run(["git", "rev-parse", "--verify", f"origin/{b}"], capture_output=True, text=True)
-                    if chk.returncode == 0:
-                        branch = b
-                        break
-            
-            local_commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-            remote_commit = subprocess.run(["git", "rev-parse", f"origin/{branch}"], capture_output=True, text=True).stdout.strip()
-            
-            if local_commit == remote_commit:
-                print("\n【版本状态】当前已是最新版本，无需更新！")
-                override = input("是否强制重新拉取代码并覆盖安装？(y/N): ").strip().lower()
-                if override != 'y':
-                    print("已取消更新。")
-                    time.sleep(1.5)
-                    return
-            else:
-                print(f"\n【检测到更新】本地版本: {local_commit[:8]}，远程最新版本: {remote_commit[:8]}")
-                confirm = input("是否确认开始更新并重启服务？(Y/n): ").strip().lower()
-                if confirm not in ('', 'y', 'yes'):
-                    print("已取消更新。")
-                    time.sleep(1.5)
-                    return
-            
-            print(f"\n正在强制重置本地代码至 origin/{branch} ...", flush=True)
-            subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], check=True)
-            
-            # Clean up python cache files
-            print("正在清理 Python 缓存 (pycache)...", flush=True)
-            subprocess.run(["find", ".", "-type", "d", "-name", "__pycache__", "-exec", "rm", "-rf", "{}", "+"], check=False)
-            
-            print("代码拉取成功，正在重新运行安装脚本...", flush=True)
-            subprocess.run(["bash", "install.sh"])
-            print("更新已完成！")
-            time.sleep(2)
+            print("当前安装目录不是 Git 仓库，已切换为源码快照部署模式。请重新运行 install.sh 获取最新版本。")
+            time.sleep(3)
         except Exception as e:
             print(f"更新失败: {e}")
             time.sleep(4)

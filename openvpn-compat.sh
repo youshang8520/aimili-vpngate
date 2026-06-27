@@ -95,6 +95,24 @@ compare_dir() {
     fi
 }
 
+make_archive() {
+    archive_base="$1"
+    archive_file=""
+    if command -v tar >/dev/null 2>&1; then
+        archive_file="${archive_base}.tar.gz"
+        tar -czf "$archive_file" -C "$OUTPUT_DIR" .
+        echo "$archive_file"
+        return
+    fi
+    if command -v zip >/dev/null 2>&1; then
+        archive_file="${archive_base}.zip"
+        (cd "$OUTPUT_DIR" && zip -qr "$archive_file" .)
+        echo "$OUTPUT_DIR/$archive_file"
+        return
+    fi
+    echo ""
+}
+
 echo -e "${BLUE}正在采集 OpenVPN 兼容差异...${PLAIN}"
 collect_file "/etc/default/aimilivpn" "$OUTPUT_DIR/etc-default-aimilivpn.backup"
 collect_file "/etc/sysctl.conf" "$OUTPUT_DIR/sysctl.conf.backup"
@@ -120,4 +138,12 @@ cat > "$OUTPUT_DIR/next-steps.txt" <<'EOF'
 4. Copy any required preserved settings into the repository-side OpenVPN compatibility helper.
 EOF
 
-echo -e "${GREEN}已生成兼容差异包: ${OUTPUT_DIR}${PLAIN}"
+ARCHIVE_PATH=$(make_archive "$OUTPUT_DIR/openvpn-compat-diff")
+if [ -n "$ARCHIVE_PATH" ]; then
+    echo -e "${GREEN}已生成兼容差异包: ${OUTPUT_DIR}${PLAIN}"
+    echo -e "${GREEN}已打包归档: ${ARCHIVE_PATH}${PLAIN}"
+    echo -e "${GREEN}包就在: ${ARCHIVE_PATH}${PLAIN}"
+else
+    echo -e "${YELLOW}已生成兼容差异包: ${OUTPUT_DIR}${PLAIN}"
+    echo -e "${YELLOW}未找到 tar/zip，未自动打包${PLAIN}"
+fi

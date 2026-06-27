@@ -47,12 +47,14 @@
 - PublicVPNList 实际 USA 国家页解析验证：通过，解析到 9 个过滤后条目，示例最高排序条目为 `87042 / 24.243.35.205 / 320.79 Mbps / 30 ms / score 69 / tcp`。
 - MCP 抓取 `/download/87042/` 受站点 robots.txt 限制，未通过 MCP 查看实际下载内容；运行时代码会按页面 `/download/{data-id}/` 下载 `.ovpn`。
 - 本轮已额外验证 `vpngate_manager.py` 语法编译通过。
-- 已新增 `openvpn-compat-run.sh` 在线拉取入口，可在服务器无需预置脚本文件时直接执行远端版本。
-- 需要确认该远端脚本已推送到仓库，否则 `raw.githubusercontent.com` 会 404。
+- `openvpn-compat.sh` 本地已包含 `make_archive()`，会在 `tar`/`zip` 可用时输出压缩包路径；若服务器仍只看到目录结果，说明拉取到的是旧发布版本。
+- `openvpn-compat-run.sh` 在线入口已改为先下载到临时文件再执行，避免 `bash <(curl ...)` 的不稳定行为。
+- `README-openvpn-compat-command.txt` 是临时参考文件，不应作为正式交付内容；后续需要清理出仓库。
 
 ### 提交记录
 - 已创建本地提交：`5a4f0b4 feat: add PublicVPNList OpenVPN source`。
 - 推送 `origin main` 失败：GitHub 返回 403，当前账号 `youshang8520` 没有 `baoweise-bot/aimili-vpngate` 的推送权限。
+- 最新 `openvpn-compat.sh` 与 `openvpn-compat-run.sh` 需要同步发布到 fork，否则服务器端会继续拉到旧内容。
 
 ### 推送记录
 - 用户已要求“复刻并推送”。
