@@ -1,1 +1,2 @@
-playwright>=1.45.0,<2
+# Core runtime uses Python standard library only.
+# Playwright is an optional PublicVPNList fallback installed by install.sh when the selected Python supports it.

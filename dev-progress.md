@@ -102,3 +102,7 @@
 - 已新增配置 `PUBLICVPNLIST_PLAYWRIGHT_FALLBACK=1`，并写入 `install.sh` 默认 `/etc/default/aimilivpn` 与旧安装补齐逻辑；`publicvpnlist_filter_summary()` 现在暴露 `download_mode` 与 `playwright_fallback`，便于确认当前下载策略。
 - 已更新 README 中文/英文文档，说明 PublicVPNList 生产下载链路已改为 HTTP-first，Playwright/Chromium 为备用运行时，仍然要求真实下载且 remote 匹配后才进入号池。
 - 本次校验：`python -m py_compile vpngate_manager.py publicvpnlist_http_download.py publicvpnlist_capture.py publicvpnlist_batch_download.py` 通过；`bash -n install.sh` 通过；`git diff --check` 通过（仅提示 `dev-progress.md` 后续可能被 Git 转 CRLF）；生产 `fetch_publicvpnlist_ovpn_config()` 在 `PUBLICVPNLIST_PLAYWRIGHT_FALLBACK=0` 下直接用 Vietnam 页 HTTP-first 链路下载成功 ID `159563`，remote 校验为 `113.22.120.209:1549/tcp` 匹配当前条目。
+- 服务器安装暴露问题：RHEL/AlmaLinux 8 的 `python3` 默认指向 Python 3.6，安装器之前固定用 `python3 -m venv`，导致即使服务器已有 Python 3.12 也没有复用；随后 `requirements.txt` 中硬性安装 `playwright>=1.45.0,<2`，在 Python 3.6 venv 中出现 `No matching distribution found for playwright<2,>=1.45.0`。
+- 已修复安装器 Python 选择：`install.sh` 新增 `select_python_runtime()`，不再使用默认 `python` / `python3` 命令，而是按明确版本号 `python3.12`、`python3.11`、`python3.10`、`python3.9`、`python3.8`、`python3.7` 的顺序复用系统已有 Python，且要求管理器运行至少 Python 3.7；RHEL/AlmaLinux/Fedora 系会额外尝试安装较新的 AppStream Python 包（优先 `python3.12`，再到 `python39` 等），之后用选中的 Python 创建 `/opt/aimilivpn/.venv`。
+- 已把 Playwright 从硬依赖改为可选备用依赖：`requirements.txt` 不再强制安装 Playwright；`install.sh` 在选中 Python >= 3.8 时才尝试安装 Playwright/Chromium，失败也不阻断部署，因为生产链路已经是 HTTP-first；如果低于 3.8，则跳过 Playwright，仅使用 HTTP-first。
+- 已更新 README 中文/英文安装说明，明确安装器会优先复用已有 `python3.12`，避免 RHEL/AlmaLinux 8 默认 Python 3.6 造成安装失败。

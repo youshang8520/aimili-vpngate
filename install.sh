@@ -99,21 +99,65 @@ prepare_source_snapshot() {
     return 1
 }
 
+python_at_least() {
+    candidate="$1"
+    major="$2"
+    minor="$3"
+    "$candidate" - "$major" "$minor" <<'PY'
+import sys
+major = int(sys.argv[1])
+minor = int(sys.argv[2])
+raise SystemExit(0 if sys.version_info >= (major, minor) else 1)
+PY
+}
+
+select_python_runtime() {
+    PYTHON_BIN=""
+    for candidate in python3.12 python3.11 python3.10 python3.9 python3.8 python3.7; do
+        if command -v "$candidate" >/dev/null 2>&1 && python_at_least "$candidate" 3 7; then
+            PYTHON_BIN=$(command -v "$candidate")
+            break
+        fi
+    done
+    if [ -z "$PYTHON_BIN" ]; then
+        echo -e "${RED}  -> 错误: 未找到明确版本号的 Python 运行时（python3.12/python3.11/python3.10/python3.9/python3.8/python3.7）。不使用默认 python/python3 命令；请安装 python3.12 或 python3.9 后重试。${PLAIN}"
+        exit 1
+    fi
+    echo -e "  -> 使用 Python 运行时: $($PYTHON_BIN -V 2>&1) ($PYTHON_BIN)"
+}
+
 setup_python_runtime() {
+    select_python_runtime
     venv_dir="${INSTALL_DIR}/.venv"
     echo -e "  -> 正在创建 Python 虚拟环境 ${venv_dir} ..."
     rm -rf "$venv_dir"
-    python3 -m venv "$venv_dir"
-    "${venv_dir}/bin/python" -m pip install --upgrade pip wheel
+    if ! "$PYTHON_BIN" -m venv "$venv_dir"; then
+        if command -v virtualenv >/dev/null 2>&1; then
+            virtualenv -p "$PYTHON_BIN" "$venv_dir"
+        else
+            echo -e "${RED}  -> 错误: 无法创建 Python 虚拟环境，且未找到 virtualenv。${PLAIN}"
+            exit 1
+        fi
+    fi
+    "${venv_dir}/bin/python" -m pip install --upgrade 'pip<24.1' wheel
     if [ -f "${INSTALL_DIR}/requirements.txt" ]; then
         "${venv_dir}/bin/python" -m pip install -r "${INSTALL_DIR}/requirements.txt"
-    else
-        "${venv_dir}/bin/python" -m pip install 'playwright>=1.45.0,<2'
     fi
-    echo -e "  -> 正在安装 Playwright Chromium，用于 PublicVPNList HTTP 链路失败时的备用交互下载 ..."
-    if ! "${venv_dir}/bin/python" -m playwright install --with-deps chromium; then
-        echo -e "${YELLOW}  -> Playwright 依赖自动安装未完全成功，正在尝试仅安装 Chromium 浏览器包。${PLAIN}"
-        "${venv_dir}/bin/python" -m playwright install chromium
+
+    if python_at_least "${venv_dir}/bin/python" 3 8; then
+        echo -e "  -> 正在安装可选 Playwright Chromium，用于 PublicVPNList HTTP 链路失败时的备用交互下载 ..."
+        if "${venv_dir}/bin/python" -m pip install 'playwright>=1.45.0,<2'; then
+            if ! "${venv_dir}/bin/python" -m playwright install --with-deps chromium; then
+                echo -e "${YELLOW}  -> Playwright 浏览器依赖自动安装未完全成功，正在尝试仅安装 Chromium 浏览器包。${PLAIN}"
+                if ! "${venv_dir}/bin/python" -m playwright install chromium; then
+                    echo -e "${YELLOW}  -> Playwright Chromium 安装失败；PublicVPNList 仍将使用 HTTP-first 生产链路，浏览器备用方式不可用。${PLAIN}"
+                fi
+            fi
+        else
+            echo -e "${YELLOW}  -> Playwright Python 包安装失败；PublicVPNList 仍将使用 HTTP-first 生产链路，浏览器备用方式不可用。${PLAIN}"
+        fi
+    else
+        echo -e "${YELLOW}  -> 当前 Python 低于 3.8，跳过可选 Playwright；PublicVPNList 使用 HTTP-first 生产链路。${PLAIN}"
     fi
 }
 
@@ -160,6 +204,13 @@ elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     $PKG_MGR install -y openvpn curl ca-certificates iptables iproute psmisc python3 python3-pip python3-virtualenv || \
     $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-virtualenv || \
     $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip
+    # RHEL/AlmaLinux 8 often exposes python3 as Python 3.6, which is too old for this manager and Playwright.
+    # Install the newest AppStream Python available, then setup_python_runtime selects it automatically.
+    $PKG_MGR install -y python3.12 python3.12-pip || \
+    $PKG_MGR install -y python3.11 python3.11-pip || \
+    $PKG_MGR install -y python3.10 python3.10-pip || \
+    $PKG_MGR install -y python39 python39-pip || \
+    $PKG_MGR install -y python38 python38-pip || true
 fi
 
 echo -e "\n${YELLOW}[2/4] 正在下载最新源码快照到 ${INSTALL_DIR} ...${PLAIN}"
