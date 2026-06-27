@@ -32,15 +32,23 @@
 - 已把 Web UI 的 Network modal 增加为三档节点来源切换，并在前端保存时提交 `node_source_mode`。
 - 已把 `node_source_mode` 接到后端 `/api/update_settings` 与 `/api/update_routing`，并在 `fetch_candidates()` 里按 `both` / `vpngate` / `publicvpnlist` 分流拉取。
 - 已修正 `selectOptionCard()`，让 `node_source_mode` 选项能像路由模式一样被高亮与回写。
+- 已开始把 `install.sh` 改成“下载 GitHub 分支快照 + 本地解压部署”的流程，目标是让生产 Linux 服务器不再执行 `git fetch/reset/clone`。
+- 已移除安装依赖中的 `git`，并把源码获取改为 GitHub archive 下载路径；默认仍指向 `youshang8520/aimili-vpngate` 的 `main` 分支。
+- 已加入快照部署辅助函数，当前方向是覆盖应用文件、保留 `/etc/openvpn` 及其客户端/服务端兼容目录，同时继续保留 `/etc/default/aimilivpn`。
+- 已按最新方向拆分出独立的 OpenVPN 兼容辅助脚本 `openvpn-compat.sh`，让安装器继续专注于仓库对齐与升级流程。
+- 已新增 `openvpn-compat-run.sh` 在线拉取入口，可在服务器无需预置脚本文件时直接执行远端版本。
+- 需要确认该远端脚本已推送到仓库，否则 `raw.githubusercontent.com` 会 404。
 
 ### 验证记录
 - `python -m py_compile vpngate_manager.py vpn_utils.py proxy_server.py`：通过。
-- `bash -n install.sh`：通过。
+- `bash -n install.sh`：先前通过；本轮改动后仍需重新核对。
 - `git diff --check`：通过。
 - PublicVPNList 样例行解析验证：通过，能生成 `https://publicvpnlist.com/download/101398/`。
 - PublicVPNList 实际 USA 国家页解析验证：通过，解析到 9 个过滤后条目，示例最高排序条目为 `87042 / 24.243.35.205 / 320.79 Mbps / 30 ms / score 69 / tcp`。
 - MCP 抓取 `/download/87042/` 受站点 robots.txt 限制，未通过 MCP 查看实际下载内容；运行时代码会按页面 `/download/{data-id}/` 下载 `.ovpn`。
 - 本轮已额外验证 `vpngate_manager.py` 语法编译通过。
+- 已新增 `openvpn-compat-run.sh` 在线拉取入口，可在服务器无需预置脚本文件时直接执行远端版本。
+- 需要确认该远端脚本已推送到仓库，否则 `raw.githubusercontent.com` 会 404。
 
 ### 提交记录
 - 已创建本地提交：`5a4f0b4 feat: add PublicVPNList OpenVPN source`。

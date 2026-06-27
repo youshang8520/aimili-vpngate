@@ -46,29 +46,50 @@ echo -e "${BLUE}==========================================================${PLAI
 echo -e "${BLUE}        欢迎使用 AimiliVPN 一键源码部署与管理脚本${PLAIN}"
 echo -e "${BLUE}==========================================================${PLAIN}"
 
-# 3. Configure GitHub Repository URL
+# 3. Configure GitHub repository metadata
 # Default to the PublicVPNList-enhanced fork (youshang8520/aimili-vpngate)
 DEFAULT_USER="youshang8520"
 DEFAULT_REPO="aimili-vpngate"
+DEFAULT_REF="main"
 
 # Allow custom repository override via command line arguments
 GITHUB_USER="${1:-${DEFAULT_USER}}"
 GITHUB_REPO="${2:-${DEFAULT_REPO}}"
+GITHUB_REF="${3:-${DEFAULT_REF}}"
 
-GITHUB_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}.git"
+GITHUB_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}"
+ARCHIVE_URL="${GITHUB_URL}/archive/refs/heads/${GITHUB_REF}.tar.gz"
+INSTALL_DIR="/opt/aimilivpn"
+STAGING_DIR="/tmp/aimilivpn-source"
+
+copy_tree_preserve() {
+    src_dir="$1"
+    dst_dir="$2"
+    mkdir -p "$dst_dir"
+    find "$src_dir" -mindepth 1 -maxdepth 1 | while IFS= read -r src_path; do
+        base_name=$(basename "$src_path")
+        if [ "$base_name" = ".git" ]; then
+            continue
+        fi
+        if [ -e "$dst_dir/$base_name" ]; then
+            rm -rf "$dst_dir/$base_name"
+        fi
+        cp -a "$src_path" "$dst_dir/"
+    done
+}
 
 echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
 if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
     apt-get update -q || true
     echo -e "  -> 正在运行 apt-get install 安装基础依赖包..."
-    apt-get install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3
+    apt-get install -y openvpn curl ca-certificates iptables iproute2 psmisc python3
 elif [ "$PKG_MGR" = "apk" ]; then
     echo -e "  -> 正在运行 apk update 更新软件源清单..."
     apk update || true
     echo -e "  -> 正在运行 apk add 安装基础依赖包..."
     # bash is required for this script itself and some internal logic
-    apk add openvpn curl git ca-certificates iptables iproute2 psmisc python3 bash
+    apk add openvpn curl ca-certificates iptables iproute2 psmisc python3 bash
 elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     echo -e "  -> 正在运行 $PKG_MGR 安装基础依赖包..."
     if [ "$OS_TYPE" != "fedora" ] && [ "$OS_TYPE" != "amzn" ]; then
@@ -76,58 +97,27 @@ elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
         $PKG_MGR install -y epel-release || true
     fi
     # Try installing packages. Note: iproute or iproute2
-    $PKG_MGR install -y openvpn curl git ca-certificates iptables iproute psmisc python3 || \
-    $PKG_MGR install -y openvpn curl git ca-certificates iptables iproute2 psmisc python3
+    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute psmisc python3 || \
+    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3
 fi
 
-# 4. Clone or pull the repository
-INSTALL_DIR="/opt/aimilivpn"
-# 默认部署分支（在 bate 分支设为 bate；在 main 分支设为 main）
-DEFAULT_DEPLOY_BRANCH="main"
-
-# 自动检测本地已安装版本当前所在的分支
-CURRENT_BRANCH=""
-if [ -d "${INSTALL_DIR}/.git" ]; then
-    CURRENT_BRANCH=$(cd "${INSTALL_DIR}" && git rev-parse --abbrev-ref HEAD 2>/dev/null)
-fi
-DEPLOY_BRANCH="${CURRENT_BRANCH:-$DEFAULT_DEPLOY_BRANCH}"
-
-echo -e "\n${YELLOW}[2/4] 正在从 GitHub 部署源代码到 ${INSTALL_DIR} (目标分支: ${DEPLOY_BRANCH})...${PLAIN}"
-if [ -f "${INSTALL_DIR}/.local_dev" ]; then
-    echo -e "${GREEN}检测到本地开发模式 (.local_dev)，跳过 git pull/reset 保持本地修改。${PLAIN}"
-else
-    if [ -d "${INSTALL_DIR}" ]; then
-        echo -e "  -> 目录 ${INSTALL_DIR} 已存在，正在更新并强制覆盖本地源码..."
-        cd "${INSTALL_DIR}"
-        git fetch --all || true
-        git checkout "${DEPLOY_BRANCH}" || git checkout -b "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}" || true
-        echo -e "  -> 正在强制重置本地源码至 origin/${DEPLOY_BRANCH} ..."
-        if git reset --hard "origin/${DEPLOY_BRANCH}"; then
-            echo -e "${GREEN}  -> 源码更新成功！${PLAIN}"
-        else
-            if git pull origin "${DEPLOY_BRANCH}"; then
-                echo -e "${GREEN}  -> 源码更新成功！${PLAIN}"
-            else
-                echo -e "${YELLOW}  -> 警告: git pull/reset 失败，将保留当前本地源码并继续安装。${PLAIN}"
-            fi
-        fi
+echo -e "\n${YELLOW}[2/4] 正在下载最新源码快照到 ${INSTALL_DIR} ...${PLAIN}"
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR"
+if command -v curl >/dev/null 2>&1; then
+    if curl -L --fail --retry 3 --connect-timeout 10 "$ARCHIVE_URL" -o "$STAGING_DIR/source.tar.gz"; then
+        tar -xzf "$STAGING_DIR/source.tar.gz" -C "$STAGING_DIR"
     else
-        echo -e "  -> 正在克隆 GitHub 仓库 ${GITHUB_URL} (分支: ${DEPLOY_BRANCH}) ..."
-        if git clone -b "${DEPLOY_BRANCH}" "${GITHUB_URL}" "${INSTALL_DIR}"; then
-            echo -e "${GREEN}  -> 克隆成功！${PLAIN}"
-        else
-            echo -e "  -> 尝试默认克隆..."
-            if git clone "${GITHUB_URL}" "${INSTALL_DIR}"; then
-                cd "${INSTALL_DIR}"
-                git checkout "${DEPLOY_BRANCH}" || git checkout -b "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}" || true
-                echo -e "${GREEN}  -> 克隆成功！${PLAIN}"
-            else
-                echo -e "${RED}  -> 错误: 无法克隆仓库 ${GITHUB_URL}，请检查网络！${PLAIN}"
-                exit 1
-            fi
-        fi
+        echo -e "${RED}  -> 错误: 无法下载源码快照 ${ARCHIVE_URL}${PLAIN}"
+        exit 1
     fi
+else
+    echo -e "${RED}  -> 错误: 需要 curl 才能下载源码快照${PLAIN}"
+    exit 1
 fi
+SNAPSHOT_ROOT=$(find "$STAGING_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+deploy_snapshot "$SNAPSHOT_ROOT"
+rm -rf "$STAGING_DIR"
 
 # 5. Configure Service
 echo -e "\n${YELLOW}[3/4] 正在配置系统服务...${PLAIN}"
