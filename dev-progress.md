@@ -93,3 +93,6 @@
 - 已把默认 PublicVPNList 拉取策略改为全国家：`PUBLICVPNLIST_MAX_DOWNLOADS=0` 表示不限制总下载数，新增 `PUBLICVPNLIST_PER_COUNTRY_LIMIT=20`，每个国家页按 Speed Mbps 降序、Latency ms 升序、Technical score 降序排序后最多取 20 个，不足 20 个全部使用。
 - 已把默认调度改为号池健康时每日刷新：`FETCH_INTERVAL_SECONDS=86400`、`CHECK_INTERVAL_SECONDS=86400`；若当前路由/国家范围内可用节点低于 `TARGET_VALID_NODES=3`，按 `LOW_POOL_RETRY_SECONDS=300` 重新拉取补池。
 - 已按用户要求修正刷新/补池合并规则：重新拉取和每天定时刷新都不会删除已经验证可用的 IP；只有某个 IP 后续被检测为不可用，才会在后续合并中被淘汰；同时号池合并按 IP 去重，避免重复 IP。
+- 已评估 PublicVPNList 下载方式：Playwright 不是唯一可用方式。站点前端 JS 使用纯 HTTP 接口 `/test_server.php?id=...` 做实时可达性检查、`/get_token.php?id=...` 生成一次性 token/URL、`/download.php?token=...` 下载 `.ovpn`。已用无浏览器纯 HTTP 会话验证 `93067`、`59931` 可成功下载 OpenVPN profile 并解析到匹配 remote；Playwright 可降级为兜底而非唯一依赖。
+- 已新增 `publicvpnlist_http_download.py` 作为 HTTP-first 测试下载器：不启动 Playwright，不保存一次性 token，只保存真实 `.ovpn` 文件和脱敏后的状态/remote 校验结果。
+- 已用 `publicvpnlist_http_download.py` 跑 Vietnam 国家页 `https://publicvpnlist.com/country/vietnam/`：解析并按每国上限选取 17 个候选，纯 HTTP 下载并校验成功 6 个，成功 ID 为 `159563`、`265229`、`168587`、`306787`、`298045`、`278824`；其余 11 个为 PublicVPNList 实时检查不可达或 UDP quick live test inconclusive。

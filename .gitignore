@@ -71,6 +71,8 @@ publicvpnlist_click_watch.py
 publicvpnlist_ip_list.txt
 publicvpnlist_usa_downloads.*
 publicvpnlist_downloads*/
+publicvpnlist_http_downloads*/
+publicvpnlist_http_*_downloads.*
 patch_publicvpn.py
 
 # ---- 系统文件 ----
