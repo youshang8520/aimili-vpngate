@@ -47,8 +47,8 @@
 - PublicVPNList 实际 USA 国家页解析验证：通过，解析到 9 个过滤后条目，示例最高排序条目为 `87042 / 24.243.35.205 / 320.79 Mbps / 30 ms / score 69 / tcp`。
 - MCP 抓取 `/download/87042/` 受站点 robots.txt 限制，未通过 MCP 查看实际下载内容；运行时代码会按页面 `/download/{data-id}/` 下载 `.ovpn`。
 - 本轮已额外验证 `vpngate_manager.py` 语法编译通过。
-- `openvpn-compat.sh` 已补充源目录缺失兜底：即使对比源不存在，也会生成 `file-list.diff` 说明原因，避免只产出状态快照。
-- `openvpn-compat-run.sh` 在线入口继续保留临时文件执行方式，确保服务器直接运行稳定。
+- 已将 `openvpn-compat.sh` 方向切换为“服务器已安装相关文件备份版”，可一次导出 `/opt/aimilivpn`、`/etc/default/aimilivpn`、`/etc/sysctl.conf`、`/etc/openvpn/`、服务文件及 `vpngate_data`。
+- 这个备份包的目标是直接比对服务器现状与仓库代码，减少反复补包。
 
 ### 提交记录
 - 已创建本地提交：`5a4f0b4 feat: add PublicVPNList OpenVPN source`。
