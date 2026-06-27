@@ -106,3 +106,5 @@
 - 已修复安装器 Python 选择：`install.sh` 新增 `select_python_runtime()`，不再使用默认 `python` / `python3` 命令，而是按明确版本号 `python3.12`、`python3.11`、`python3.10`、`python3.9`、`python3.8`、`python3.7` 的顺序复用系统已有 Python，且要求管理器运行至少 Python 3.7；RHEL/AlmaLinux/Fedora 系会额外尝试安装较新的 AppStream Python 包（优先 `python3.12`，再到 `python39` 等），之后用选中的 Python 创建 `/opt/aimilivpn/.venv`。
 - 已把 Playwright 从硬依赖改为可选备用依赖：`requirements.txt` 不再强制安装 Playwright；`install.sh` 在选中 Python >= 3.8 时才尝试安装 Playwright/Chromium，失败也不阻断部署，因为生产链路已经是 HTTP-first；如果低于 3.8，则跳过 Playwright，仅使用 HTTP-first。
 - 已更新 README 中文/英文安装说明，明确安装器会优先复用已有 `python3.12`，避免 RHEL/AlmaLinux 8 默认 Python 3.6 造成安装失败。
+- 服务器二次安装验证已确认安装器正确复用 `/usr/bin/python3.12`，但 Playwright 在 RHEL/AlmaLinux 上执行 `playwright install --with-deps chromium` 会按 Ubuntu fallback 尝试调用 `apt-get`，输出 `sh: apt-get: command not found`；这不是 HTTP-first 生产链路失败，而是浏览器备用依赖安装方式不适配非 apt 系统。
+- 已修正 Playwright 备用安装：`install.sh` 仅在 apt 系统上执行 `playwright install --with-deps chromium`；dnf/yum/apk 等非 apt 系统跳过 `--with-deps`，直接执行 `playwright install chromium`，避免错误调用 `apt-get`。即使 Chromium 安装失败，PublicVPNList 仍使用 HTTP-first 生产链路继续部署。

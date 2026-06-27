@@ -147,8 +147,15 @@ setup_python_runtime() {
     if python_at_least "${venv_dir}/bin/python" 3 8; then
         echo -e "  -> 正在安装可选 Playwright Chromium，用于 PublicVPNList HTTP 链路失败时的备用交互下载 ..."
         if "${venv_dir}/bin/python" -m pip install 'playwright>=1.45.0,<2'; then
-            if ! "${venv_dir}/bin/python" -m playwright install --with-deps chromium; then
-                echo -e "${YELLOW}  -> Playwright 浏览器依赖自动安装未完全成功，正在尝试仅安装 Chromium 浏览器包。${PLAIN}"
+            if [ "$PKG_MGR" = "apt-get" ]; then
+                if ! "${venv_dir}/bin/python" -m playwright install --with-deps chromium; then
+                    echo -e "${YELLOW}  -> Playwright 浏览器依赖自动安装未完全成功，正在尝试仅安装 Chromium 浏览器包。${PLAIN}"
+                    if ! "${venv_dir}/bin/python" -m playwright install chromium; then
+                        echo -e "${YELLOW}  -> Playwright Chromium 安装失败；PublicVPNList 仍将使用 HTTP-first 生产链路，浏览器备用方式不可用。${PLAIN}"
+                    fi
+                fi
+            else
+                echo -e "${YELLOW}  -> 当前系统不是 apt 系，跳过 Playwright --with-deps，避免错误调用 apt-get；仅安装可选 Chromium 浏览器包。${PLAIN}"
                 if ! "${venv_dir}/bin/python" -m playwright install chromium; then
                     echo -e "${YELLOW}  -> Playwright Chromium 安装失败；PublicVPNList 仍将使用 HTTP-first 生产链路，浏览器备用方式不可用。${PLAIN}"
                 fi
