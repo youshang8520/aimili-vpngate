@@ -189,28 +189,103 @@ update_env_default_line() {
     fi
 }
 
+install_openvpn_compat_wrapper() {
+    if [ -f /usr/local/sbin/openvpn24-compat ]; then
+        chmod +x /usr/local/sbin/openvpn24-compat || true
+        echo -e "  -> 检测到已有 /usr/local/sbin/openvpn24-compat，保留现有 wrapper，不覆盖。"
+        return 0
+    fi
+    echo -e "  -> 正在安装 OpenVPN 2.4 兼容 wrapper: /usr/local/sbin/openvpn24-compat"
+    mkdir -p /usr/local/sbin
+    cat > /usr/local/sbin/openvpn24-compat <<'EOF'
+#!/usr/bin/env bash
+set -e
+
+REAL_OPENVPN="${REAL_OPENVPN:-/usr/sbin/openvpn}"
+
+if [ ! -x "$REAL_OPENVPN" ]; then
+    REAL_OPENVPN="$(command -v openvpn || true)"
+fi
+
+if [ -z "$REAL_OPENVPN" ] || [ ! -x "$REAL_OPENVPN" ]; then
+    echo "openvpn24-compat: cannot find executable openvpn" >&2
+    exit 127
+fi
+
+legacy_ciphers="AES-128-CBC:AES-256-GCM:AES-128-GCM"
+args=("$@")
+new_args=()
+skip_next=0
+
+for ((i=0; i<${#args[@]}; i++)); do
+    if [ "$skip_next" = "1" ]; then
+        skip_next=0
+        continue
+    fi
+
+    case "${args[$i]}" in
+        --config)
+            cfg="${args[$((i+1))]:-}"
+            if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+                sed -i -E \
+                    -e '/^[[:space:]]*data-ciphers([[:space:]]|$)/d' \
+                    -e '/^[[:space:]]*data-ciphers-fallback([[:space:]]|$)/d' \
+                    "$cfg"
+            fi
+            new_args+=("--config" "$cfg")
+            skip_next=1
+            ;;
+        --data-ciphers|--data-ciphers-fallback)
+            skip_next=1
+            ;;
+        --data-ciphers=*|--data-ciphers-fallback=*)
+            ;;
+        --ncp-ciphers)
+            new_args+=("--ncp-ciphers" "$legacy_ciphers")
+            skip_next=1
+            ;;
+        --ncp-ciphers=*)
+            new_args+=("--ncp-ciphers" "$legacy_ciphers")
+            ;;
+        *)
+            new_args+=("${args[$i]}")
+            ;;
+    esac
+done
+
+exec "$REAL_OPENVPN" "${new_args[@]}"
+EOF
+    chmod +x /usr/local/sbin/openvpn24-compat
+}
+
+OPENVPN_PACKAGE="openvpn"
+if command -v openvpn >/dev/null 2>&1 || [ -x /usr/sbin/openvpn ] || [ -x /usr/local/sbin/openvpn ]; then
+    OPENVPN_PACKAGE=""
+    echo -e "${YELLOW}检测到系统已安装 OpenVPN，安装器将保留现有 OpenVPN 包，不重新安装或覆盖。${PLAIN}"
+fi
+
 echo -e "\n${YELLOW}[1/4] 正在安装系统基础依赖...${PLAIN}"
 if [ "$PKG_MGR" = "apt-get" ]; then
     echo -e "  -> 正在运行 apt-get update 更新软件源清单..."
     apt-get update -q || true
     echo -e "  -> 正在运行 apt-get install 安装基础依赖包..."
-    apt-get install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-venv
+    apt-get install -y $OPENVPN_PACKAGE curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-venv
 elif [ "$PKG_MGR" = "apk" ]; then
     echo -e "  -> 正在运行 apk update 更新软件源清单..."
     apk update || true
     echo -e "  -> 正在运行 apk add 安装基础依赖包..."
     # bash is required for this script itself and some internal logic
-    apk add openvpn curl ca-certificates iptables iproute2 psmisc python3 py3-pip py3-virtualenv bash
+    apk add $OPENVPN_PACKAGE curl ca-certificates iptables iproute2 psmisc python3 py3-pip py3-virtualenv bash
 elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     echo -e "  -> 正在运行 $PKG_MGR 安装基础依赖包..."
-    if [ "$OS_TYPE" != "fedora" ] && [ "$OS_TYPE" != "amzn" ]; then
+    if [ -n "$OPENVPN_PACKAGE" ] && [ "$OS_TYPE" != "fedora" ] && [ "$OS_TYPE" != "amzn" ]; then
         echo -e "     -> 正在安装 EPEL 软件源 (以支持 openvpn)..."
         $PKG_MGR install -y epel-release || true
     fi
     # Try installing packages. Note: iproute or iproute2
-    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute psmisc python3 python3-pip python3-virtualenv || \
-    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-virtualenv || \
-    $PKG_MGR install -y openvpn curl ca-certificates iptables iproute2 psmisc python3 python3-pip
+    $PKG_MGR install -y $OPENVPN_PACKAGE curl ca-certificates iptables iproute psmisc python3 python3-pip python3-virtualenv || \
+    $PKG_MGR install -y $OPENVPN_PACKAGE curl ca-certificates iptables iproute2 psmisc python3 python3-pip python3-virtualenv || \
+    $PKG_MGR install -y $OPENVPN_PACKAGE curl ca-certificates iptables iproute2 psmisc python3 python3-pip
     # RHEL/AlmaLinux 8 often exposes python3 as Python 3.6, which is too old for this manager and Playwright.
     # Install the newest AppStream Python available, then setup_python_runtime selects it automatically.
     $PKG_MGR install -y python3.12 python3.12-pip || \
@@ -234,6 +309,7 @@ setup_python_runtime
 
 # 5. Configure Service
 echo -e "\n${YELLOW}[3/4] 正在配置系统服务...${PLAIN}"
+install_openvpn_compat_wrapper
 if [ ! -f /etc/default/aimilivpn ]; then
     echo -e "  -> 正在创建默认环境配置 /etc/default/aimilivpn ..."
     cat > /etc/default/aimilivpn <<'EOF'
