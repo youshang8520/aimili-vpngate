@@ -265,6 +265,7 @@ def load_ui_config() -> dict[str, Any]:
             "proxy_port": LOCAL_PROXY_PORT,
             "routing_mode": "auto",
             "force_country": "",
+            "force_country_source": "",
             "routing_ip_type": "all",
             "node_source_mode": "both",
             "connection_enabled": True,
@@ -278,7 +279,7 @@ def load_ui_config() -> dict[str, Any]:
                 data = json.loads(auth_file.read_text(encoding="utf-8"))
                 for key, val in data.items():
                     config[key] = val
-                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "routing_ip_type", "node_source_mode", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
+                for key in ["host", "port", "proxy_port", "routing_mode", "force_country", "force_country_source", "routing_ip_type", "node_source_mode", "connection_enabled", "fixed_node_id", "favorite_node_ids", "fav_fail_fallback"]:
                     if key not in data:
                         updated = True
             except Exception:
@@ -421,7 +422,12 @@ def get_state() -> dict[str, Any]:
     state["proxy_port"] = ui_cfg.get("proxy_port", 7928)
     state["routing_mode"] = ui_cfg.get("routing_mode", "auto")
     state["force_country"] = ui_cfg.get("force_country", "")
-    state["routing_ip_type"] = ui_cfg.get("routing_ip_type", "all")
+    state["force_country_source"] = ui_cfg.get("force_country_source", "")
+    node_source_mode = str(ui_cfg.get("node_source_mode") or "both").strip().lower()
+    if node_source_mode not in ("both", "vpngate", "publicvpnlist"):
+        node_source_mode = "both"
+    state["node_source_mode"] = node_source_mode
+    state["routing_ip_type"] = "all" if node_source_mode == "publicvpnlist" else ui_cfg.get("routing_ip_type", "all")
     state["connection_enabled"] = ui_cfg.get("connection_enabled", True)
     state["fixed_node_id"] = ui_cfg.get("fixed_node_id", "")
     state["favorite_node_ids"] = ui_cfg.get("favorite_node_ids", [])
@@ -755,6 +761,33 @@ def resolve_node_source_mode(ui_cfg: dict[str, Any]) -> str:
     if mode not in ("both", "vpngate", "publicvpnlist"):
         return "both"
     return mode
+
+
+def node_source_value(node: dict[str, Any]) -> str:
+    source = str(node.get("source") or "vpngate").strip().lower()
+    if source not in ("vpngate", "publicvpnlist"):
+        return "vpngate"
+    return source
+
+
+def node_matches_source_mode(node: dict[str, Any], source_mode: str) -> bool:
+    return source_mode == "both" or node_source_value(node) == source_mode
+
+
+def resolve_force_country_source(ui_cfg: dict[str, Any]) -> str:
+    source = str(ui_cfg.get("force_country_source") or "").strip().lower()
+    if source in ("vpngate", "publicvpnlist"):
+        return source
+    return ""
+
+
+def normalize_routing_ip_type_for_source(routing_ip_type: str, source_mode: str) -> str:
+    value = str(routing_ip_type or "all").strip().lower()
+    if value not in ("all", "residential", "hosting"):
+        value = "all"
+    if source_mode == "publicvpnlist":
+        return "all"
+    return value
 
 
 def publicvpnlist_filter_summary() -> dict[str, Any]:
@@ -1856,8 +1889,24 @@ def apply_routing_filters(
     candidates = list(nodes)
     routing_mode = ui_cfg.get("routing_mode", "auto")
     target_country = ui_cfg.get("force_country", "")
+    source_mode = resolve_node_source_mode(ui_cfg)
+
+    candidates = [n for n in candidates if node_matches_source_mode(n, source_mode)]
 
     if routing_mode == "fixed_region" and target_country:
+        target_source = resolve_force_country_source(ui_cfg)
+        if source_mode == "both" and not target_source:
+            matching_sources = {
+                node_source_value(n)
+                for n in candidates
+                if country_matches(n.get("country"), target_country)
+            }
+            if len(matching_sources) == 1:
+                target_source = next(iter(matching_sources))
+            else:
+                return []
+        if target_source:
+            candidates = [n for n in candidates if node_source_value(n) == target_source]
         candidates = [
             n for n in candidates
             if country_matches(n.get("country"), target_country)
@@ -1866,17 +1915,19 @@ def apply_routing_filters(
         fav_ids = set(ui_cfg.get("favorite_node_ids", []))
         candidates = [n for n in candidates if n.get("id") in fav_ids]
 
-    routing_ip_type = ui_cfg.get("routing_ip_type", "all")
+    routing_ip_type = normalize_routing_ip_type_for_source(ui_cfg.get("routing_ip_type", "all"), source_mode)
     if routing_ip_type == "residential":
         candidates = [
             n for n in candidates
-            if n.get("ip_type") in ("residential", "mobile")
+            if node_source_value(n) == "publicvpnlist"
+            or n.get("ip_type") in ("residential", "mobile")
             or (include_unknown_ip_type and not n.get("ip_type"))
         ]
     elif routing_ip_type == "hosting":
         candidates = [
             n for n in candidates
-            if n.get("ip_type") == "hosting"
+            if node_source_value(n) == "publicvpnlist"
+            or n.get("ip_type") == "hosting"
             or (include_unknown_ip_type and not n.get("ip_type"))
         ]
 
@@ -1910,9 +1961,19 @@ def current_fixed_node_id(ui_cfg: dict[str, Any]) -> str:
 def validate_node_allowed_by_routing(node: dict[str, Any], ui_cfg: dict[str, Any]) -> None:
     routing_mode = ui_cfg.get("routing_mode", "auto")
     node_id = str(node.get("id") or "")
+    source_mode = resolve_node_source_mode(ui_cfg)
+    if not node_matches_source_mode(node, source_mode):
+        source_label = "PublicVPNList" if source_mode == "publicvpnlist" else "VPNGate"
+        raise RuntimeError(f"当前节点来源已切换为【{source_label}】，不能连接其他来源节点")
 
     if routing_mode == "fixed_region":
         target_country = ui_cfg.get("force_country", "")
+        target_source = resolve_force_country_source(ui_cfg)
+        if source_mode == "both" and target_country and not target_source:
+            raise RuntimeError("当前双来源固定地区未指定 VPNGate 或 PublicVPNList 分组，不能把两个来源按同一国家强行混合")
+        if target_source and node_source_value(node) != target_source:
+            source_label = "PublicVPNList" if target_source == "publicvpnlist" else "VPNGate"
+            raise RuntimeError(f"当前已锁定【{source_label} / {target_country}】，不能连接其他来源节点")
         if target_country and not country_matches(node.get("country"), target_country):
             raise RuntimeError(f"当前已锁定国家【{target_country}】，不能连接其他国家节点")
     elif routing_mode == "favorites":
@@ -1920,12 +1981,13 @@ def validate_node_allowed_by_routing(node: dict[str, Any], ui_cfg: dict[str, Any
         if node_id not in fav_ids:
             raise RuntimeError("当前处于仅用收藏模式，不能连接未收藏节点")
 
-    routing_ip_type = ui_cfg.get("routing_ip_type", "all")
-    node_ip_type = node.get("ip_type")
-    if routing_ip_type == "residential" and node_ip_type not in ("residential", "mobile"):
-        raise RuntimeError("当前已锁定住宅 IP 出站，不能连接非住宅节点")
-    if routing_ip_type == "hosting" and node_ip_type != "hosting":
-        raise RuntimeError("当前已锁定机房 IP 出站，不能连接非机房节点")
+    routing_ip_type = normalize_routing_ip_type_for_source(ui_cfg.get("routing_ip_type", "all"), source_mode)
+    if node_source_value(node) == "vpngate":
+        node_ip_type = node.get("ip_type")
+        if routing_ip_type == "residential" and node_ip_type not in ("residential", "mobile"):
+            raise RuntimeError("当前已锁定住宅 IP 出站，不能连接非住宅节点")
+        if routing_ip_type == "hosting" and node_ip_type != "hosting":
+            raise RuntimeError("当前已锁定机房 IP 出站，不能连接非机房节点")
 
 def enforce_active_node_allowed_by_routing(ui_cfg: dict[str, Any], reason: str = "路由规则已更新") -> str | None:
     active_id = active_openvpn_node_id
@@ -2567,14 +2629,13 @@ def maintain_valid_nodes(force: bool = False) -> str:
                     auto_switch_node()
                     if active_openvpn_running():
                         valid_nodes_count = len([n for n in read_nodes() if n.get("probe_status") == "available"])
-                        message = f"Fetched {len(candidates)} nodes. Fast-tested {len(fast_test_ids)} nodes and connected."
+                        message = f"Fetched {len(candidates)} nodes. Fast-tested {len(fast_test_ids)} nodes and connected. 正在继续检测剩余候选节点。"
                         set_state(
                             last_check_at=time.time(),
                             last_check_message=message,
                             active_openvpn_node_id=active_openvpn_node_id,
                             valid_nodes=valid_nodes_count,
                         )
-                        return message
                     is_connecting = True
 
         # Test remaining non-active nodes from the list
@@ -3943,6 +4004,11 @@ INDEX_HTML = r"""<!doctype html>
       <option value="testing">检测中</option>
       <option value="unavailable">失效节点</option>
     </select>
+    <select id="source_filter">
+      <option value="">全部来源（分组展示）</option>
+      <option value="vpngate">仅 VPNGate</option>
+      <option value="publicvpnlist">仅 PublicVPNList</option>
+    </select>
     <select id="country_filter">
       <option value="">所有国家</option>
     </select>
@@ -3994,7 +4060,7 @@ INDEX_HTML = r"""<!doctype html>
             <th>物理位置</th>
             <th>运营主体 / ISP</th>
             <th style="width: 110px;">IP 类型</th>
-            <th style="width: 180px;">操作</th>
+            <th style="width: 240px;">操作</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -4131,20 +4197,24 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </div>
 
+          <div id="net_routing_ip_type_group" class="form-group" style="margin-bottom: 16px;">
+            <label class="form-label">IP 类型过滤</label>
+            <input type="hidden" id="net_routing_ip_type" value="all">
             <div class="option-group" id="routing_ip_type_group">
               <div class="option-card active" data-value="all" onclick="setRoutingIpType('all')">
                 <div class="option-card-title">所有IP</div>
-                <div class="option-card-desc">机房 + 住宅</div>
+                <div class="option-card-desc">不按住宅/机房筛选</div>
               </div>
               <div class="option-card" data-value="residential" onclick="setRoutingIpType('residential')">
                 <div class="option-card-title">住宅IP</div>
-                <div class="option-card-desc">静态家宽</div>
+                <div class="option-card-desc">仅适用于 VPNGate</div>
               </div>
               <div class="option-card" data-value="hosting" onclick="setRoutingIpType('hosting')">
                 <div class="option-card-title">机房IP</div>
-                <div class="option-card-desc">普通机房</div>
+                <div class="option-card-desc">仅适用于 VPNGate</div>
               </div>
             </div>
+            <div id="net_routing_ip_type_note" style="font-size: 12px; color: var(--text-secondary); margin-top: 6px; line-height: 1.4;">住宅/机房分类来自 VPNGate/IP 识别；PublicVPNList 节点不强套该分类。</div>
           </div>
           
           <div id="net_routing_warning" style="font-size: 12px; color: var(--text-secondary); line-height: 1.4; padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 6px; margin-top: 8px;">
@@ -4421,16 +4491,18 @@ function getLatencyClass(ms) {
 function updateCountryFilter() {
   const select = $("country_filter");
   const selectedValue = select.value;
-  const countries = Array.from(new Set(nodes.map(n => n ? translateCountry(n.country) : "").filter(Boolean))).sort();
-  
+  const selectedSource = $("source_filter") ? $("source_filter").value : "";
+  const countryNodes = selectedSource ? nodes.filter(n => nodeSource(n) === selectedSource) : nodes;
+  const countries = Array.from(new Set(countryNodes.map(n => n ? translateCountry(n.country) : "").filter(Boolean))).sort();
+
   const currentOptions = Array.from(select.options).map(o => o.value).filter(Boolean);
   if (JSON.stringify(countries) === JSON.stringify(currentOptions)) {
     return;
   }
-  
-  select.innerHTML = '<option value="">所有国家</option>' + 
+
+  select.innerHTML = '<option value="">所有国家</option>' +
     countries.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
-  
+
   if (countries.includes(selectedValue)) {
     select.value = selectedValue;
   } else {
@@ -4442,8 +4514,12 @@ function getFilteredNodes() {
   const selectedCountry = $("country_filter").value;
   const selectedIpType = $("ip_type_filter").value;
   const selectedStatus = $("status_filter").value;
+  const selectedSource = $("source_filter") ? $("source_filter").value : "";
   return nodes.filter(n => {
     if (!n) return false;
+    if (selectedSource && nodeSource(n) !== selectedSource) {
+      return false;
+    }
     if (selectedCountry && translateCountry(n.country) !== selectedCountry) {
       return false;
     }
@@ -4484,6 +4560,14 @@ function stableSortNodes() {
     const bId = b.id || "";
     return aId.localeCompare(bId);
   });
+}
+
+function sourceRank(source) {
+  return source === "publicvpnlist" ? 1 : 0;
+}
+
+function getSeparatedNodes(list) {
+  return list.slice().sort((a, b) => sourceRank(nodeSource(a)) - sourceRank(nodeSource(b)));
 }
 
 function render(){
@@ -4533,7 +4617,8 @@ function render(){
               ${esc(activeNode.ip || activeNode.remote_host)}:${activeNode.remote_port || ""}
             </div>
             <div class="active-card-meta" style="margin-top: 4px;">
-              <span>物理位置: <strong>${esc(displayLocation)}</strong></span>
+              <span>来源: <strong>${esc(sourceLabel(nodeSource(activeNode)))}</strong></span>
+              <span style="margin-left: 12px;">物理位置: <strong>${esc(displayLocation)}</strong></span>
               <span style="margin-left: 12px;">延时: <strong>${latencyText}</strong></span>
               <span style="margin-left: 12px;">运营主体: <strong>${esc(activeNode.owner || activeNode.as_name || "-")}</strong></span>
               <span style="margin-left: 12px;">IP 类型: <strong>${esc(translateIpType(activeNode.ip_type))}</strong></span>
@@ -4566,9 +4651,9 @@ function render(){
     `;
   }
 
-  const shown = getFilteredNodes();
-  
-  if ($("total")) $("total").textContent = nodes.length; 
+  const shown = getSeparatedNodes(getFilteredNodes());
+
+  if ($("total")) $("total").textContent = nodes.length;
   if ($("target")) $("target").textContent = state.target_valid_nodes || 3;
   if ($("active")) $("active").textContent = activeNode ? 1 : 0; 
   
@@ -4637,48 +4722,64 @@ function render(){
   const endIndex = Math.min(startIndex + pageSize, shown.length);
   currentPageNodes = shown.slice(startIndex, endIndex);
 
-  // Render table rows
+  // Render table rows by source. 两个来源只是放在同一个 UI，展示和测试都按来源分组。
   if (currentPageNodes.length === 0) {
-    $("rows").innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
+    $("rows").innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
   } else {
+    const sourceCounts = shown.reduce((acc, n) => {
+      const source = nodeSource(n);
+      acc[source] = (acc[source] || 0) + 1;
+      return acc;
+    }, { vpngate: 0, publicvpnlist: 0 });
+    let lastRenderedSource = "";
     $("rows").innerHTML=currentPageNodes.map(n=>{
       if (!n) return '';
+      const source = nodeSource(n);
+      let sourceHeader = "";
+      if (source !== lastRenderedSource) {
+        lastRenderedSource = source;
+        const testableCount = currentPageNodes.filter(item => item && nodeSource(item) === source && !item.active && item.probe_status !== "testing").length;
+        sourceHeader = `<tr class="source-separator-row"><td colspan="6" style="background: rgba(99,102,241,0.08); border-top: 1px solid rgba(99,102,241,0.25); border-bottom: 1px solid rgba(99,102,241,0.18); padding: 10px 14px; color: var(--text-primary);">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div><strong>${esc(sourceLabel(source))}</strong><span style="margin-left:8px; color:var(--text-secondary); font-size:12px;">${sourceCounts[source] || 0} 个节点，独立展示、独立检测</span></div>
+            <button type="button" class="test-btn" style="height:28px; padding:0 10px;" ${testableCount ? '' : 'disabled'} onclick="testVisibleSourceNodes('${esc(source)}', event)">检测本组前5个</button>
+          </div>
+        </td></tr>`;
+      }
       const isCurrentlyActive = activeNode && n.id === activeNode.id;
       const rowClass = isCurrentlyActive ? 'class="active-row"' : '';
-      
+
       const badgeClass = isCurrentlyActive ? 'available' : (n.probe_status || 'not_checked');
       const badgeText = isCurrentlyActive ? '<span class="badge-pulse"></span>已连接' : translateStatus(n.probe_status);
       const latencyClass = getLatencyClass(n.latency_ms);
-      const latencyText = n.latency_ms ? `<span class="latency-val ${latencyClass}">${n.latency_ms} ms</span>` : "-";
       const displayLocation = n.location || translateCountry(n.country) || "-";
-      
+
       const isTesting = testingNodeIds.has(n.id) || n.probe_status === "testing";
       const testSpinner = `<svg style="animation: spin 1s linear infinite; width: 12px; height: 12px; display: inline-block; margin-right: 4px; vertical-align: middle;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" fill="none"></circle><path d="M4 12a8 8 0 018-8" stroke="currentColor" fill="none"></path></svg>`;
       const testBtnText = isTesting ? `${testSpinner}检测中` : '检测';
       const testBtn = `<button class="test-btn" data-node-id="${esc(n.id)}" ${isTesting ? 'disabled' : ''} onclick="testNode(this, '${esc(n.id)}', event)">${testBtnText}</button>`;
-      
-      // Connect button is disabled if probe status is "unavailable" and not already active, or if we are already connecting
-      // Connect button is disabled if probe status is "unavailable" and not already active, or if we are already connecting
+
       const isUnavailable = n.probe_status === "unavailable";
-      const connectBtn = isCurrentlyActive 
+      const connectBtn = isCurrentlyActive
         ? `<button class="connect-btn" disabled style="background: var(--success-gradient); color: white; cursor: default; opacity: 1;">已连接</button>`
         : `<button class="connect-btn" ${(isUnavailable || isTesting || state.is_connecting) ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} onclick="connectNode('${esc(n.id)}')">切换</button>`;
-      
+
       const favoriteIds = Array.isArray(state.favorite_node_ids) ? state.favorite_node_ids : [];
       const isFav = favoriteIds.includes(n.id);
-      const favBtn = isFav 
+      const favBtn = isFav
         ? `<button class="test-btn" style="color: var(--warning); border-color: rgba(245, 158, 11, 0.4); padding: 0 8px; height: 30px;" onclick="toggleFavorite('${esc(n.id)}', event)">★ 已收藏</button>`
         : `<button class="test-btn" style="color: var(--text-secondary); border-color: var(--border-color); padding: 0 8px; height: 30px;" onclick="toggleFavorite('${esc(n.id)}', event)">☆ 收藏</button>`;
 
-      return `<tr ${rowClass}>
+      return `${sourceHeader}<tr ${rowClass}>
         <td><span class="badge ${badgeClass}">${badgeText}</span></td>
-        <td class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}">${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
+        <td class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}"><span class="badge" style="margin-right:6px; padding:1px 6px; font-size:10px;">${esc(sourceLabel(source))}</span>${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(displayLocation)}">${esc(displayLocation)}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.owner||n.as_name||"-")}">${esc(n.owner||n.as_name||"-")}</td>
-        <td style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(translateIpType(n.ip_type))}">${esc(translateIpType(n.ip_type))}</td>
+        <td style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(source === "publicvpnlist" ? "PublicVPNList 不使用住宅/机房分类" : translateIpType(n.ip_type))}">${esc(source === "publicvpnlist" ? "独立来源" : translateIpType(n.ip_type))}</td>
         <td>
           <div class="table-actions">
             ${favBtn}
+            ${testBtn}
             ${connectBtn}
           </div>
         </td>
@@ -4703,12 +4804,12 @@ function render(){
 $("btn_first_page").onclick = () => { currentPage = 1; render(); };
 $("btn_prev_page").onclick = () => { if (currentPage > 1) { currentPage--; render(); } };
 $("btn_next_page").onclick = () => {
-  const shown = getFilteredNodes();
+  const shown = getSeparatedNodes(getFilteredNodes());
   const totalPages = Math.ceil(shown.length / pageSize) || 1;
   if (currentPage < totalPages) { currentPage++; render(); }
 };
 $("btn_last_page").onclick = () => {
-  const shown = getFilteredNodes();
+  const shown = getSeparatedNodes(getFilteredNodes());
   const totalPages = Math.ceil(shown.length / pageSize) || 1;
   currentPage = totalPages;
   render();
@@ -4718,7 +4819,7 @@ async function testNode(btn, id, event){
   if (event) event.stopPropagation();
   testingNodeIds.add(id);
   render();
-  
+
   try {
     const response = await fetch("./api/test_node", {
       method: "POST",
@@ -4731,10 +4832,52 @@ async function testNode(btn, id, event){
       if (idx !== -1) {
         nodes[idx] = result.node;
       }
+    } else if (!result.ok) {
+      alert("检测失败: " + (result.error || "未知错误"));
     }
   } catch (e) {
+    alert("检测请求失败");
   } finally {
     testingNodeIds.delete(id);
+    render();
+  }
+}
+
+async function testVisibleSourceNodes(source, event) {
+  if (event) event.stopPropagation();
+  const ids = currentPageNodes
+    .filter(n => n && nodeSource(n) === source && !n.active && n.probe_status !== "testing")
+    .map(n => n.id)
+    .filter(Boolean)
+    .slice(0, 5);
+
+  if (!ids.length) {
+    alert(`${sourceLabel(source)} 当前没有可检测的节点`);
+    return;
+  }
+
+  ids.forEach(id => testingNodeIds.add(id));
+  render();
+
+  try {
+    const response = await fetch("./api/test_nodes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids })
+    });
+    const result = await response.json();
+    if (result.ok && Array.isArray(result.nodes)) {
+      result.nodes.forEach(updated => {
+        const idx = nodes.findIndex(n => n && n.id === updated.id);
+        if (idx !== -1) nodes[idx] = { ...nodes[idx], ...updated };
+      });
+    } else {
+      alert("批量检测失败: " + (result.error || "未知错误"));
+    }
+  } catch (e) {
+    alert("批量检测请求失败");
+  } finally {
+    ids.forEach(id => testingNodeIds.delete(id));
     render();
   }
 }
@@ -4895,6 +5038,9 @@ async function load(){
   
   stableSortNodes();
   updateCountryFilter();
+  if ($("network_modal") && $("network_modal").style.display === "flex") {
+    populateRoutingCountries();
+  }
   render();
 
   if (state.maintenance_running) {
@@ -4903,6 +5049,7 @@ async function load(){
     startConnectionPolling();
   }
 }
+$("source_filter").onchange=()=>{ currentPage = 1; updateCountryFilter(); render(); };
 $("country_filter").onchange=()=>{ currentPage = 1; render(); };
 $("ip_type_filter").onchange=()=>{ currentPage = 1; render(); };
 $("status_filter").onchange=()=>{ currentPage = 1; render(); };
@@ -5043,7 +5190,9 @@ async function toggleFavRouting() {
       body: JSON.stringify({
         routing_mode: newMode,
         force_country: state.force_country || "",
-        routing_ip_type: state.routing_ip_type || "all"
+        force_country_source: state.force_country_source || "",
+        routing_ip_type: state.node_source_mode === "publicvpnlist" ? "all" : (state.routing_ip_type || "all"),
+        node_source_mode: state.node_source_mode || "both"
       })
     });
     const data = await res.json();
@@ -5105,12 +5254,72 @@ function setRoutingMode(value) {
   selectOptionCard('routing_mode', value);
 }
 
+function getNodeSourceMode() {
+  const input = $("net_node_source_mode");
+  const value = (input && input.value) || (state && state.node_source_mode) || "both";
+  return ["both", "vpngate", "publicvpnlist"].includes(value) ? value : "both";
+}
+
+function nodeSource(n) {
+  const source = (n && n.source ? String(n.source).toLowerCase() : "vpngate");
+  return ["vpngate", "publicvpnlist"].includes(source) ? source : "vpngate";
+}
+
+function nodeMatchesSourceMode(n, mode) {
+  return mode === "both" || nodeSource(n) === mode;
+}
+
+function sourceLabel(source) {
+  return source === "publicvpnlist" ? "PublicVPNList" : "VPNGate";
+}
+
+function parseCountrySelection(value) {
+  const raw = value || "";
+  const parts = raw.split("::");
+  if (parts.length >= 2 && ["vpngate", "publicvpnlist"].includes(parts[0])) {
+    return { source: parts[0], country: parts.slice(1).join("::") };
+  }
+  return { source: "", country: raw };
+}
+
+function countrySelectionValue(country, source, mode) {
+  if (mode === "both" && source) {
+    return `${source}::${country}`;
+  }
+  return country;
+}
+
 function setRoutingIpType(value) {
+  if (getNodeSourceMode() === "publicvpnlist") {
+    value = "all";
+  }
   selectOptionCard('routing_ip_type', value);
 }
 
 function setNodeSourceMode(value) {
   selectOptionCard('node_source_mode', value);
+  handleSourceModeChange(value);
+  populateRoutingCountries();
+}
+
+function handleSourceModeChange(mode) {
+  const normalizedMode = ["both", "vpngate", "publicvpnlist"].includes(mode) ? mode : "both";
+  const group = $("net_routing_ip_type_group");
+  const note = $("net_routing_ip_type_note");
+  if (!group) return;
+
+  if (normalizedMode === "publicvpnlist") {
+    selectOptionCard('routing_ip_type', "all");
+    group.style.display = "none";
+    if (note) note.textContent = "PublicVPNList 不使用 VPNGate 的住宅/机房分类，已自动改为所有 IP。";
+  } else {
+    group.style.display = "block";
+    if (note) {
+      note.textContent = normalizedMode === "both"
+        ? "双来源只是在同一界面展示；住宅/机房过滤只约束 VPNGate，PublicVPNList 不强套该分类。"
+        : "住宅/机房分类仅用于 VPNGate 节点。";
+    }
+  }
 }
 
 function handleRoutingModeChange(mode) {
@@ -5122,7 +5331,7 @@ function handleRoutingModeChange(mode) {
     warningDiv.style.color = "var(--warning)";
     warningDiv.style.background = "rgba(245, 158, 11, 0.1)";
     warningDiv.style.border = "1px solid rgba(245, 158, 11, 0.2)";
-    warningDiv.innerHTML = `⚠️ <strong>固定地区</strong>：限制仅连接选定国家的节点，且后台仅并发测速该国家的节点。如果该国的所有可用节点都失效，会造成代理中断且<strong>绝不自动切换到其他国家</strong>的节点。`;
+    warningDiv.innerHTML = `⚠️ <strong>固定地区</strong>：限制仅连接选定来源分组与国家的节点；双来源模式下必须在 VPNGate 或 PublicVPNList 分组内选择国家，不会把两个来源按同一国家强行混合。如果该分组/国家的所有可用节点都失效，会造成代理中断且<strong>绝不自动切换到其他国家</strong>的节点。`;
   } else if (mode === "favorites") {
     countryGroup.style.display = "none";
     warningDiv.style.color = "var(--warning)";
@@ -5147,24 +5356,68 @@ function handleRoutingModeChange(mode) {
 function populateRoutingCountries() {
   const select = $("net_force_country");
   if (!select) return;
-  const countMap = {};
+  const previousValue = select.value;
+  const mode = getNodeSourceMode();
+  const sourceOrder = mode === "both" ? ["vpngate", "publicvpnlist"] : [mode];
+  const countMap = { vpngate: {}, publicvpnlist: {} };
+
   nodes.forEach(n => {
+    if (!n) return;
+    const source = nodeSource(n);
+    if (!sourceOrder.includes(source)) return;
     const c = translateCountry(n.country);
     if (c) {
-      countMap[c] = (countMap[c] || 0) + 1;
+      countMap[source][c] = (countMap[source][c] || 0) + 1;
     }
   });
-  
-  const countries = Object.keys(countMap).sort();
+
   let html = '<option value="">请选择要锁定的国家...</option>';
-  countries.forEach(c => {
-    html += `<option value="${esc(c)}">${esc(c)} (${countMap[c]}个节点)</option>`;
-  });
-  select.innerHTML = html;
-  
-  if (state) {
-    select.value = state.force_country ? translateCountry(state.force_country) : "";
+  if (mode === "both") {
+    sourceOrder.forEach(source => {
+      const countries = Object.keys(countMap[source]).sort();
+      if (!countries.length) return;
+      html += `<optgroup label="${esc(sourceLabel(source))}">`;
+      countries.forEach(c => {
+        const value = `${source}::${c}`;
+        html += `<option value="${esc(value)}">${esc(c)} (${countMap[source][c]}个节点)</option>`;
+      });
+      html += '</optgroup>';
+    });
+  } else {
+    const countries = Object.keys(countMap[mode]).sort();
+    countries.forEach(c => {
+      html += `<option value="${esc(c)}">${esc(c)} (${countMap[mode][c]}个节点)</option>`;
+    });
   }
+  select.innerHTML = html;
+
+  const values = Array.from(select.options).map(o => o.value);
+  if (previousValue && values.includes(previousValue)) {
+    select.value = previousValue;
+    return;
+  }
+
+  if (state && state.force_country) {
+    const stateCountry = translateCountry(state.force_country);
+    const stateSource = ["vpngate", "publicvpnlist"].includes(state.force_country_source) ? state.force_country_source : "";
+    const directValue = countrySelectionValue(stateCountry, stateSource, mode);
+    if (values.includes(directValue)) {
+      select.value = directValue;
+      return;
+    }
+    if (mode !== "both" && values.includes(stateCountry)) {
+      select.value = stateCountry;
+      return;
+    }
+    if (mode === "both") {
+      const matchingValues = sourceOrder.map(source => countrySelectionValue(stateCountry, source, mode)).filter(value => values.includes(value));
+      if (matchingValues.length === 1) {
+        select.value = matchingValues[0];
+        return;
+      }
+    }
+  }
+  select.value = "";
 }
 
 function openCredentialsModal() {
@@ -5290,10 +5543,11 @@ function openNetworkModal() {
     const sourceMode = state.node_source_mode || "both";
 
     selectOptionCard('routing_mode', mode);
-    selectOptionCard('routing_ip_type', ipType);
+    selectOptionCard('routing_ip_type', sourceMode === "publicvpnlist" ? "all" : ipType);
     selectOptionCard('node_source_mode', sourceMode);
+    handleSourceModeChange(sourceMode);
   }
-  
+
   populateRoutingCountries();
   $("network_modal").style.display = "flex";
   $("admin_dropdown").style.display = "none";
@@ -5308,16 +5562,18 @@ async function saveNetwork(e) {
   const errorDivEl = $("network_error");
   const successDiv = $("network_success");
   const submitBtn = $("network_submit_btn");
-  
+
   errorDivEl.style.display = "none";
   successDiv.style.display = "none";
-  
+
   const proxyPort = parseInt($("net_proxy_port").value);
   const routingMode = $("net_routing_mode").value;
-  const forceCountry = $("net_force_country").value;
+  const countrySelection = parseCountrySelection($("net_force_country").value);
+  const forceCountry = countrySelection.country;
+  const forceCountrySource = countrySelection.source;
   const routingIpType = $("net_routing_ip_type").value;
   const sourceMode = $("net_node_source_mode").value;
-  
+
   if (isNaN(proxyPort) || proxyPort < 1024 || proxyPort > 65535) {
     errorDivEl.textContent = "代理出站端口范围必须在 1024 至 65535 之间";
     errorDivEl.style.display = "block";
@@ -5329,9 +5585,14 @@ async function saveNetwork(e) {
     errorDivEl.style.display = "block";
     return;
   }
-  
+
   if (routingMode === "fixed_region" && !forceCountry) {
     errorDivEl.textContent = "请选择一个要锁定的目标国家";
+    errorDivEl.style.display = "block";
+    return;
+  }
+  if (routingMode === "fixed_region" && sourceMode === "both" && !forceCountrySource) {
+    errorDivEl.textContent = "双来源固定地区必须在 VPNGate 或 PublicVPNList 分组下选择国家，不能混合两个来源";
     errorDivEl.style.display = "block";
     return;
   }
@@ -5346,37 +5607,41 @@ async function saveNetwork(e) {
     return;
   }
 
-  
+
   submitBtn.disabled = true;
   submitBtn.textContent = "正在保存...";
-  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+
   try {
     const res = await fetch("./api/update_settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         proxy_port: proxyPort,
         routing_mode: routingMode,
         force_country: forceCountry,
-        routing_ip_type: routingIpType,
+        force_country_source: forceCountrySource,
+        routing_ip_type: sourceMode === "publicvpnlist" ? "all" : routingIpType,
         node_source_mode: sourceMode
       })
     });
-    
+
     const data = await res.json();
     if (res.ok && data.ok) {
       if (data.restart_needed) {
-        successDiv.textContent = "保存成功！代理出站端口已变更，页面将在 4 秒内自动刷新...";
+        successDiv.textContent = data.message || "保存成功！代理出站端口已变更，页面将在 4 秒内自动刷新...";
         successDiv.style.display = "block";
-        
+
         const inputs = $("network_form").querySelectorAll("input, button");
         inputs.forEach(el => el.disabled = true);
-        
+
         setTimeout(() => {
           window.location.reload();
         }, 4000);
       } else {
-        successDiv.textContent = "配置保存成功，已即时生效！";
+        successDiv.textContent = data.message || "配置保存成功，已即时生效！";
         successDiv.style.display = "block";
         setTimeout(() => {
           closeNetworkModal();
@@ -5390,10 +5655,12 @@ async function saveNetwork(e) {
       submitBtn.textContent = "保存修改";
     }
   } catch (err) {
-    errorDivEl.textContent = "连接服务器失败，请稍后重试";
+    errorDivEl.textContent = err && err.name === "AbortError" ? "保存请求超时，请检查服务状态后重试" : "连接服务器失败，请稍后重试";
     errorDivEl.style.display = "block";
     submitBtn.disabled = false;
     submitBtn.textContent = "保存修改";
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -6217,7 +6484,8 @@ class Handler(BaseHTTPRequestHandler):
                 new_proxy_port = payload.get("proxy_port")
                 routing_mode = str(payload.get("routing_mode") or "auto").strip()
                 force_country = str(payload.get("force_country") or "").strip()
-                routing_ip_type = str(payload.get("routing_ip_type") or "all").strip()
+                force_country_source = str(payload.get("force_country_source") or "").strip().lower()
+                routing_ip_type = str(payload.get("routing_ip_type") or "all").strip().lower()
                 node_source_mode = str(payload.get("node_source_mode") or "both").strip().lower()
                 try:
                     new_proxy_port_int = int(new_proxy_port)
@@ -6236,8 +6504,18 @@ class Handler(BaseHTTPRequestHandler):
                 if node_source_mode not in ("both", "vpngate", "publicvpnlist"):
                     self.send_json({"ok": False, "error": "无效的节点来源切换"}, HTTPStatus.BAD_REQUEST)
                     return
-                
+                if force_country_source and force_country_source not in ("vpngate", "publicvpnlist"):
+                    self.send_json({"ok": False, "error": "无效的锁定国家来源"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if routing_mode == "fixed_region" and node_source_mode == "both" and not force_country_source:
+                    self.send_json({"ok": False, "error": "双来源固定地区必须在 VPNGate 或 PublicVPNList 分组下选择国家，不能把两个来源强行混合"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if node_source_mode != "both":
+                    force_country_source = ""
+                routing_ip_type = normalize_routing_ip_type_for_source(routing_ip_type, node_source_mode)
+
                 ui_cfg = load_ui_config()
+                previous_source_mode = resolve_node_source_mode(ui_cfg)
                 expected_proxy_port = ui_cfg.get("proxy_port", 7928)
                 fixed_node_id = current_fixed_node_id(ui_cfg) if routing_mode == "fixed_ip" else ""
                 
@@ -6251,6 +6529,7 @@ class Handler(BaseHTTPRequestHandler):
                 ui_cfg["proxy_port"] = new_proxy_port_int
                 ui_cfg["routing_mode"] = routing_mode
                 ui_cfg["force_country"] = force_country
+                ui_cfg["force_country_source"] = force_country_source
                 ui_cfg["routing_ip_type"] = routing_ip_type
                 ui_cfg["node_source_mode"] = node_source_mode
                 if routing_mode == "favorites":
@@ -6264,7 +6543,7 @@ class Handler(BaseHTTPRequestHandler):
                     write_json(auth_file, ui_cfg)
 
                 source_message = ""
-                if source_mode != node_source_mode:
+                if previous_source_mode != node_source_mode:
                     source_message = "节点来源切换已保存，正在按新来源刷新候选节点..."
                     threading.Thread(target=lambda: refresh_nodes(True), daemon=True).start()
 
@@ -6292,7 +6571,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self.read_json_body()
                 routing_mode = str(payload.get("routing_mode") or "auto").strip()
                 force_country = str(payload.get("force_country") or "").strip()
-                routing_ip_type = str(payload.get("routing_ip_type") or "all").strip()
+                force_country_source = str(payload.get("force_country_source") or "").strip().lower()
+                routing_ip_type = str(payload.get("routing_ip_type") or "all").strip().lower()
                 node_source_mode = str(payload.get("node_source_mode") or "both").strip().lower()
                 
                 if routing_mode not in ("auto", "fixed_ip", "fixed_region", "favorites"):
@@ -6304,8 +6584,18 @@ class Handler(BaseHTTPRequestHandler):
                 if node_source_mode not in ("both", "vpngate", "publicvpnlist"):
                     self.send_json({"ok": False, "error": "无效的节点来源切换"}, HTTPStatus.BAD_REQUEST)
                     return
-                
+                if force_country_source and force_country_source not in ("vpngate", "publicvpnlist"):
+                    self.send_json({"ok": False, "error": "无效的锁定国家来源"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if routing_mode == "fixed_region" and node_source_mode == "both" and not force_country_source:
+                    self.send_json({"ok": False, "error": "双来源固定地区必须在 VPNGate 或 PublicVPNList 分组下选择国家，不能把两个来源强行混合"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if node_source_mode != "both":
+                    force_country_source = ""
+                routing_ip_type = normalize_routing_ip_type_for_source(routing_ip_type, node_source_mode)
+
                 ui_cfg = load_ui_config()
+                previous_source_mode = resolve_node_source_mode(ui_cfg)
                 fixed_node_id = current_fixed_node_id(ui_cfg) if routing_mode == "fixed_ip" else ""
                 if routing_mode == "fixed_ip" and not fixed_node_id:
                     self.send_json({"ok": False, "error": "启用固定 IP 前，请先连接一个要锁定的节点"}, HTTPStatus.BAD_REQUEST)
@@ -6313,14 +6603,20 @@ class Handler(BaseHTTPRequestHandler):
 
                 ui_cfg["routing_mode"] = routing_mode
                 ui_cfg["force_country"] = force_country
+                ui_cfg["force_country_source"] = force_country_source
                 ui_cfg["routing_ip_type"] = routing_ip_type
                 ui_cfg["node_source_mode"] = node_source_mode
                 if routing_mode == "fixed_ip":
                     ui_cfg["fixed_node_id"] = fixed_node_id
                 ui_cfg.pop("enable_force_country", None)
-                source_mode = resolve_node_source_mode(ui_cfg)
+
+                auth_file = DATA_DIR / "ui_auth.json"
+                with lock:
+                    DATA_DIR.mkdir(exist_ok=True, parents=True)
+                    write_json(auth_file, ui_cfg)
+
                 source_message = ""
-                if source_mode != node_source_mode:
+                if previous_source_mode != node_source_mode:
                     source_message = "节点来源切换已保存，正在按新来源刷新候选节点..."
                     threading.Thread(target=lambda: refresh_nodes(True), daemon=True).start()
 
