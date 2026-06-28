@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import concurrent.futures
+from datetime import datetime, timedelta, timezone
 import sys
 import uuid
 
@@ -152,6 +153,9 @@ CHECK_INTERVAL_SECONDS = env_int("CHECK_INTERVAL_SECONDS", FETCH_INTERVAL_SECOND
 LOW_POOL_RETRY_SECONDS = env_int("LOW_POOL_RETRY_SECONDS", 5 * 60, 1)
 TARGET_VALID_NODES = env_int("TARGET_VALID_NODES", 3, 1)
 MAX_SCAN_ROWS = env_int("MAX_SCAN_ROWS", 300, 1)
+MAX_NODE_POOL_SIZE = env_int("MAX_NODE_POOL_SIZE", 50, 1)
+MAX_UNAVAILABLE_TEST_RECORDS = env_int("MAX_UNAVAILABLE_TEST_RECORDS", 3, 1)
+BEIJING_DAILY_FETCH_HOUR = env_int("BEIJING_DAILY_FETCH_HOUR", 3, 0, 23)
 OPENVPN_TEST_TIMEOUT_SECONDS = env_int("OPENVPN_TEST_TIMEOUT_SECONDS", 35, 1)
 MANUAL_TEST_NODE_LIMIT = env_int("MANUAL_TEST_NODE_LIMIT", 5, 1, 20)
 INITIAL_CONNECT_TEST_LIMIT = env_int("INITIAL_CONNECT_TEST_LIMIT", 10, 1, 50)
@@ -977,7 +981,8 @@ def publicvpnlist_item_to_node(item: dict[str, Any], config_text: str) -> dict[s
     node_id = safe_name("_".join(["PVL", cfg_id, country_short or "XX", ip or remote_host, str(remote_port), proto]))
     config_path = CONFIG_DIR / f"{node_id}.ovpn"
     country_long = str(item.get("country_name") or item.get("country") or "")
-    country_zh = vpn_utils.COUNTRY_TRANSLATIONS.get(country_long, vpn_utils.COUNTRY_TRANSLATIONS.get(country_long.strip(), country_long))
+    country_raw = str(item.get("country") or "")
+    country_zh = vpn_utils.normalize_country_label(country_long)
     speed_mbps = parse_float(item.get("speed"), 0.0)
     latency = parse_int(item.get("latency"))
     score = parse_int(item.get("score"))
@@ -989,6 +994,8 @@ def publicvpnlist_item_to_node(item: dict[str, Any], config_text: str) -> dict[s
         "publicvpnlist_id": cfg_id,
         "country": country_zh,
         "country_short": country_short,
+        "country_raw": country_raw,
+        "source_country": country_long,
         "host_name": item.get("host", ""),
         "ip": ip or remote_host,
         "score": score,
@@ -1003,6 +1010,11 @@ def publicvpnlist_item_to_node(item: dict[str, Any], config_text: str) -> dict[s
         "location": "",
         "ip_type": "",
         "quality": "",
+        "risk_score": None,
+        "risk_source": "",
+        "ippure_score": None,
+        "ping0_score": None,
+        "risk_checked_at": 0,
         "latency_ms": 0,
         "config_file": str(config_path),
         "config_text": config_text,
@@ -1099,8 +1111,9 @@ def extract_publicvpnlist_download_target(download_url: str, text: str) -> str:
     return ""
 
 
-def fetch_publicvpnlist_candidates(seen_ips: set[str], blacklist: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def fetch_publicvpnlist_candidates(seen_ips: set[str] | None, blacklist: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    seen_ips = seen_ips if seen_ips is not None else set()
     source_urls = publicvpnlist_source_urls()
     if not source_urls:
         return candidates
@@ -1403,12 +1416,14 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
     config_path = CONFIG_DIR / f"{node_id}.ovpn"
     
     country_long = row.get("CountryLong", "")
-    country_zh = vpn_utils.COUNTRY_TRANSLATIONS.get(country_long, vpn_utils.COUNTRY_TRANSLATIONS.get(country_long.strip(), country_long))
+    country_zh = vpn_utils.normalize_country_label(country_long)
     return {
         "id": node_id,
         "source": "vpngate",
         "country": country_zh,
         "country_short": country_short,
+        "country_raw": country_long,
+        "source_country": country_long,
         "host_name": row.get("HostName", ""),
         "ip": ip,
         "score": parse_int(row.get("Score")),
@@ -1421,6 +1436,11 @@ def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
         "location": "",
         "ip_type": "",
         "quality": "",
+        "risk_score": None,
+        "risk_source": "",
+        "ippure_score": None,
+        "ping0_score": None,
+        "risk_checked_at": 0,
         "latency_ms": 0,
         "config_file": str(config_path),
         "config_text": config_text,
@@ -1500,14 +1520,15 @@ def fetch_candidates() -> list[dict[str, Any]]:
     publicvpnlist_count = 0
     try:
         if source_mode in ("both", "publicvpnlist"):
-            public_nodes = fetch_publicvpnlist_candidates(seen_ips, blacklist)
+            public_seen_ips = seen_ips if source_mode == "publicvpnlist" else set()
+            public_nodes = fetch_publicvpnlist_candidates(public_seen_ips, blacklist)
             publicvpnlist_count = len(public_nodes)
             candidates.extend(public_nodes)
     except Exception as exc:
         print(f"[PublicVPNList] 附加来源拉取异常，保留已有 VPNGate 节点继续运行: {exc}", flush=True)
         log_to_json("WARNING", "Main", f"PublicVPNList 附加来源拉取异常: {exc}")
 
-    if not candidates:
+    if not candidates and source_mode in ("both", "vpngate"):
         err_code, diag_msg = vpn_utils.diagnose_api_failure(API_URL)
         full_err_msg = f"获取官方 API 节点最终失败: {last_err} | 诊断结果: {diag_msg}"
         print(f"[错误代码 {err_code}] {full_err_msg}", flush=True)
@@ -1521,6 +1542,9 @@ def fetch_candidates() -> list[dict[str, Any]]:
             raise RuntimeError(diag_msg) from last_err
         else:
             raise RuntimeError(diag_msg)
+    if not candidates:
+        print("[fetch_candidates] 当前来源未拉取到新候选节点，将复用本地保留节点继续检测。", flush=True)
+        log_to_json("WARNING", "Main", "当前来源未拉取到新候选节点，将复用本地保留节点继续检测")
 
     set_state(
         last_fetch_at=time.time(),
@@ -1927,9 +1951,68 @@ def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
     unavailable_nodes = sorted(
         [n for n in nodes if n.get("probe_status") == "unavailable" and not n.get("active")],
-        key=lambda n: (-parse_int(n.get("score")), -float(n.get("probed_at", 0)))
+        key=lambda n: (parse_int(n.get("probe_fail_count")), -parse_int(n.get("score")), -float(n.get("probed_at", 0)))
     )
     return available_nodes + untested_nodes + unavailable_nodes
+
+def apply_probe_result_to_node(
+    node: dict[str, Any],
+    ok: bool,
+    message: str,
+    latency: int = 0,
+    probed_at: float | None = None,
+) -> None:
+    ts = probed_at or time.time()
+    node["latency_ms"] = latency
+    node["probe_status"] = "available" if ok else "unavailable"
+    node["probe_message"] = message
+    node["probed_at"] = ts
+    if ok:
+        node["probe_fail_count"] = 0
+        node["probe_success_count"] = parse_int(node.get("probe_success_count")) + 1
+        node["last_available_at"] = ts
+    else:
+        node["probe_fail_count"] = parse_int(node.get("probe_fail_count")) + 1
+        node["last_unavailable_at"] = ts
+
+
+def node_exceeded_unavailable_limit(node: dict[str, Any]) -> bool:
+    return (
+        not node.get("active")
+        and node.get("probe_status") == "unavailable"
+        and parse_int(node.get("probe_fail_count")) > MAX_UNAVAILABLE_TEST_RECORDS
+    )
+
+
+def pool_trim_key(node: dict[str, Any]) -> tuple[int, int, int, int, int, float]:
+    status = str(node.get("probe_status") or "not_checked")
+    if node.get("active"):
+        status_rank = 0
+    elif status == "available":
+        status_rank = 1
+    elif status in ("not_checked", "testing"):
+        status_rank = 2
+    elif status == "unavailable":
+        status_rank = 3
+    else:
+        status_rank = 4
+    fail_count = parse_int(node.get("probe_fail_count"))
+    latency = parse_int(node.get("latency_ms")) or parse_int(node.get("ping")) or 999999
+    return (
+        status_rank,
+        fail_count,
+        latency,
+        -parse_int(node.get("score")),
+        -parse_int(node.get("speed")),
+        -float(node.get("probed_at") or node.get("fetched_at") or 0),
+    )
+
+
+def trim_node_pool(nodes: list[dict[str, Any]], max_size: int = MAX_NODE_POOL_SIZE) -> list[dict[str, Any]]:
+    if len(nodes) <= max_size:
+        return sort_all_nodes(nodes)
+    sorted_nodes = sorted(nodes, key=pool_trim_key)
+    return sort_all_nodes(sorted_nodes[:max_size])
 
 def apply_routing_filters(
     nodes: list[dict[str, Any]],
@@ -1984,11 +2067,10 @@ def apply_routing_filters(
     return candidates
 
 def normalized_country_name(country: Any) -> str:
-    value = str(country or "").strip()
-    return vpn_utils.COUNTRY_TRANSLATIONS.get(value, value)
+    return vpn_utils.normalize_country_label(country)
 
 def country_matches(node_country: Any, target_country: Any) -> bool:
-    return bool(target_country) and normalized_country_name(node_country) == normalized_country_name(target_country)
+    return bool(target_country) and vpn_utils.country_alias_key(node_country) == vpn_utils.country_alias_key(target_country)
 
 def probe_priority_key(node: dict[str, Any]) -> tuple[int, int, int, int]:
     ping = parse_int(node.get("ping")) or 999999
@@ -2185,10 +2267,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         nodes = read_nodes()
         node = next((item for item in nodes if item.get("id") == node_id), None)
         if node:
-            node["latency_ms"] = latency
-            node["probe_status"] = "available" if ok else "unavailable"
-            node["probe_message"] = message
-            node["probed_at"] = time.time()
+            apply_probe_result_to_node(node, ok, message, latency, time.time())
             if ok:
                 node["owner"] = temp_node["owner"]
                 node["asn"] = temp_node["asn"]
@@ -2233,6 +2312,8 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
                     skipped["probe_status"] = "available"
                     skipped["probe_message"] = "当前活动连接节点，跳过临时检测"
                     skipped["probed_at"] = now
+                    skipped["last_available_at"] = now
+                    skipped["probe_fail_count"] = 0
                     updated_nodes_map[nid] = skipped
                     continue
                 n["probe_status"] = "testing"
@@ -2329,8 +2410,21 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
                                         n["probed_at"] = updated_nodes_map[nid].get("probed_at", time.time())
                                     n["probe_status"] = "available"
                                     n["probe_message"] = n.get("probe_message") or "当前活动连接节点"
+                                    n["probe_fail_count"] = 0
+                                    n["last_available_at"] = time.time()
                                 else:
-                                    n.update(updated_nodes_map[nid])
+                                    res = updated_nodes_map[nid]
+                                    ok = res.get("probe_status") == "available"
+                                    apply_probe_result_to_node(
+                                        n,
+                                        ok,
+                                        str(res.get("probe_message") or ""),
+                                        parse_int(res.get("latency_ms")),
+                                        float(res.get("probed_at") or time.time()),
+                                    )
+                                    for key in ("remote_host", "remote_port", "owner", "asn", "as_name", "location", "ip_type", "quality"):
+                                        if res.get(key) not in (None, ""):
+                                            n[key] = res.get(key)
                                 break
                         write_json(NODES_FILE, sort_all_nodes(current_nodes))
 
@@ -2345,6 +2439,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         with lock:
             current_nodes = read_nodes()
             current_active_id = active_openvpn_node_id
+            filtered_nodes: list[dict[str, Any]] = []
             for n in current_nodes:
                 nid = str(n.get("id") or "")
                 if nid in updated_nodes_map:
@@ -2354,9 +2449,18 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
                             n["probed_at"] = updated_nodes_map[nid].get("probed_at", time.time())
                         n["probe_status"] = "available"
                         n["probe_message"] = n.get("probe_message") or "当前活动连接节点"
+                        n["probe_fail_count"] = 0
+                        n["last_available_at"] = time.time()
                     else:
-                        n.update(updated_nodes_map[nid])
-            sorted_nodes = sort_all_nodes(current_nodes)
+                        res = updated_nodes_map[nid]
+                        # 测试完成时已即时写回一次探测结果；这里仅合并批量富化后的字段，
+                        # 避免同一次批量检测重复累计不可用次数。
+                        for key in ("remote_host", "remote_port", "owner", "asn", "as_name", "location", "ip_type", "quality"):
+                            if res.get(key) not in (None, ""):
+                                n[key] = res.get(key)
+                if not node_exceeded_unavailable_limit(n):
+                    filtered_nodes.append(n)
+            sorted_nodes = sort_all_nodes(filtered_nodes)
             write_json(NODES_FILE, sorted_nodes)
 
         return list(updated_nodes_map.values())
@@ -2602,8 +2706,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
             set_state(last_fetch_at=time.time(), last_fetch_status="error", last_fetch_message=diag_msg)
             candidates = []
 
-        if not candidates:
-            return "没有拉取到新节点"
+        no_new_candidates = not candidates
 
         with lock:
             current_nodes = read_nodes()
@@ -2619,8 +2722,23 @@ def maintain_valid_nodes(force: bool = False) -> str:
             def node_ip_key(node: dict[str, Any]) -> str:
                 return str(node.get("ip") or node.get("remote_host") or "").strip()
 
-            current_by_ip = {
-                node_ip_key(n): n
+            def node_identity_key(node: dict[str, Any]) -> str:
+                source = node_source_value(node)
+                node_id = str(node.get("id") or "").strip()
+                if node_id:
+                    return f"{source}::{node_id}"
+                node_ip = node_ip_key(node)
+                port = str(node.get("remote_port") or "").strip()
+                proto = str(node.get("proto") or "").strip().lower()
+                return f"{source}::{node_ip}:{port}:{proto}"
+
+            current_by_key = {
+                node_identity_key(n): n
+                for n in current_nodes
+                if node_identity_key(n)
+            }
+            current_by_source_ip = {
+                (node_source_value(n), node_ip_key(n)): n
                 for n in current_nodes
                 if node_ip_key(n)
             }
@@ -2629,28 +2747,40 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 "probe_message",
                 "latency_ms",
                 "probed_at",
+                "probe_fail_count",
+                "probe_success_count",
+                "last_unavailable_at",
+                "last_available_at",
                 "owner",
                 "asn",
                 "as_name",
                 "location",
                 "ip_type",
                 "quality",
+                "risk_score",
+                "risk_source",
+                "ippure_score",
+                "ping0_score",
+                "risk_checked_at",
             ]
             merged: list[dict[str, Any]] = []
-            seen_ids: set[str] = set()
-            seen_node_ips: set[str] = set()
+            seen_keys: set[str] = set()
+            seen_source_ips: set[tuple[str, str]] = set()
 
             def add_merged(node: dict[str, Any]) -> bool:
-                node_id = str(node.get("id") or "")
+                identity_key = node_identity_key(node)
                 node_ip = node_ip_key(node)
-                if not node_id:
+                source_ip_key = (node_source_value(node), node_ip)
+                if not identity_key:
                     return False
-                if node_id in seen_ids or (node_ip and node_ip in seen_node_ips):
+                if identity_key in seen_keys or (node_ip and source_ip_key in seen_source_ips):
+                    return False
+                if node_exceeded_unavailable_limit(node):
                     return False
                 merged.append(node)
-                seen_ids.add(node_id)
+                seen_keys.add(identity_key)
                 if node_ip:
-                    seen_node_ips.add(node_ip)
+                    seen_source_ips.add(source_ip_key)
                 return True
 
             if active_node:
@@ -2658,30 +2788,26 @@ def maintain_valid_nodes(force: bool = False) -> str:
 
             for cand in candidates:
                 cand_ip = node_ip_key(cand)
-                if str(cand.get("id") or "") in seen_ids or (cand_ip and cand_ip in seen_node_ips):
+                cand_key = node_identity_key(cand)
+                source_ip_key = (node_source_value(cand), cand_ip)
+                if cand_key in seen_keys or (cand_ip and source_ip_key in seen_source_ips):
                     continue
-                previous = current_by_id.get(str(cand.get("id") or "")) or current_by_ip.get(cand_ip)
+                previous = current_by_key.get(cand_key) or current_by_source_ip.get(source_ip_key)
                 if previous:
                     for key in preserve_keys:
                         if previous.get(key) not in (None, ""):
                             cand[key] = previous.get(key)
                 add_merged(cand)
 
-            # 低水位补池或每日刷新时，不移除已经验证可用的节点；
-            # 如果新一轮列表没有包含这些 IP，仍保留它们作为备用池。
+            # 低水位补池或每日刷新时，不移除已经验证可用的节点；未超过失败阈值的不可用节点也保留，
+            # 后续周期会复用已有配置优先重测，避免因为一次超时反复重新下载。
             for existing in current_nodes:
                 if existing.get("active") or existing.get("probe_status") == "available":
                     add_merged(existing)
+                elif existing.get("probe_status") == "unavailable" and not node_exceeded_unavailable_limit(existing):
+                    add_merged(existing)
 
-            if len(merged) > 1000:
-                protected = [n for n in merged if n.get("active") or n.get("probe_status") == "available"]
-                protected_ids = {str(n.get("id") or "") for n in protected}
-                protected_ips = {node_ip_key(n) for n in protected if node_ip_key(n)}
-                rest = [
-                    n for n in merged
-                    if str(n.get("id") or "") not in protected_ids and node_ip_key(n) not in protected_ips
-                ]
-                merged = protected + rest[:max(0, 1000 - len(protected))]
+            merged = trim_node_pool(merged)
                 
             for n in merged:
                 config_path = Path(n["config_file"])
@@ -2746,11 +2872,18 @@ def maintain_valid_nodes(force: bool = False) -> str:
         # Test remaining non-active nodes from the list
         with lock:
             current_nodes = read_nodes()
-            to_test = [
-                n for n in current_nodes
-                if not n.get("active") and n.get("id") not in initial_tested_ids
-            ]
-            to_test_ids = [n["id"] for n in to_test]
+            to_test = sorted(
+                [
+                    n for n in current_nodes
+                    if not n.get("active") and n.get("id") not in initial_tested_ids
+                ],
+                key=lambda n: (
+                    0 if n.get("probe_status") == "unavailable" else 1,
+                    parse_int(n.get("probe_fail_count")),
+                    pool_trim_key(n),
+                ),
+            )
+            to_test_ids = [n["id"] for n in to_test if n.get("id")]
             
         msg = f"开始对列表中所有候选节点进行周期连通性与延迟测试，待检测节点共 {len(to_test_ids)} 个"
         print(f"[周期检测] {msg}", flush=True)
@@ -2796,6 +2929,8 @@ def maintain_valid_nodes(force: bool = False) -> str:
 
         valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
         message = f"Fetched {len(candidates)} nodes. Tested {len(to_test_ids)} non-active nodes."
+        if no_new_candidates:
+            message += " 没有拉取到新节点，已复测保留节点。"
         set_state(
             last_check_at=time.time(),
             last_check_message=message,
@@ -2816,6 +2951,16 @@ def available_node_count() -> int:
         return len(nodes)
     except Exception:
         return 0
+
+
+def seconds_until_beijing_hour(hour: int = BEIJING_DAILY_FETCH_HOUR) -> int:
+    now = datetime.now(timezone.utc)
+    beijing_tz = timezone(timedelta(hours=8))
+    beijing_now = now.astimezone(beijing_tz)
+    target = beijing_now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= beijing_now:
+        target += timedelta(days=1)
+    return max(1, int((target - beijing_now).total_seconds()))
 
 
 def collector_loop() -> None:
@@ -2845,7 +2990,13 @@ def collector_loop() -> None:
             print(f"[低水位补池] {msg}", flush=True)
             log_to_json("INFO", "Main", msg)
         else:
-            sleep_time = CHECK_INTERVAL_SECONDS
+            if CHECK_INTERVAL_SECONDS >= 12 * 60 * 60:
+                sleep_time = seconds_until_beijing_hour(BEIJING_DAILY_FETCH_HOUR)
+                msg = f"号池健康，下一次周期刷新尽量对齐北京时间 {BEIJING_DAILY_FETCH_HOUR:02d}:00，约 {sleep_time} 秒后执行"
+                print(f"[每日刷新] {msg}", flush=True)
+                log_to_json("INFO", "Main", msg)
+            else:
+                sleep_time = CHECK_INTERVAL_SECONDS
 
         time.sleep(sleep_time)
 
@@ -4162,6 +4313,7 @@ INDEX_HTML = r"""<!doctype html>
             <th style="width: 220px;">IP 地址 : 端口</th>
             <th>物理位置</th>
             <th>运营主体 / ISP</th>
+            <th style="width: 120px;">速度</th>
             <th style="width: 110px;">IP 类型</th>
             <th style="width: 240px;">操作</th>
           </tr>
@@ -4497,6 +4649,13 @@ const esc=s=>String(s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 const base=p=>(p||"").split(/[\\/]/).pop();
 function time(ts){return ts?new Date(ts*1000).toLocaleString():"从未"}
 function speed(v){return v?`${(v*8/1000/1000).toFixed(1)} Mbps`:"-"}
+function nodeSpeed(n){
+  if (nodeSource(n) === "publicvpnlist") {
+    const mbps = Number(n.speed_mbps || 0);
+    return mbps > 0 ? `${mbps.toFixed(2)} Mbps` : "-";
+  }
+  return speed(Number(n.speed || 0));
+}
 
 const translateQuality = q => {
   const dict = {"normal": "普通", "proxy": "代理", "datacenter": "数据中心", "mobile": "移动端"};
@@ -4511,17 +4670,40 @@ const translateIpType = t => {
 const translateCountry = c => {
   const dict = {
     "Japan": "日本",
+    "JP": "日本",
+    "jp": "日本",
+    "JPN": "日本",
     "Korea Republic of": "韩国",
     "Korea": "韩国",
-    "Republic of Korea": "韩国",
+    "South Korea": "韩国",
+    "KR": "韩国",
+    "kr": "韩国",
+    "KOR": "韩国",
     "Thailand": "泰国",
-    "United States": "美国",
-    "United Kingdom": "英国",
-    "Russian Federation": "俄罗斯",
-    "Russian": "俄罗斯",
+    "TH": "泰国",
+    "th": "泰国",
     "Viet Nam": "越南",
     "Vietnam": "越南",
+    "VN": "越南",
+    "vn": "越南",
     "China": "中国",
+    "CN": "中国",
+    "cn": "中国",
+    "United States": "美国",
+    "United States of America": "美国",
+    "USA": "美国",
+    "usa": "美国",
+    "US": "美国",
+    "us": "美国",
+    "United Kingdom": "英国",
+    "UK": "英国",
+    "uk": "英国",
+    "GB": "英国",
+    "gb": "英国",
+    "Russian Federation": "俄罗斯",
+    "Russian": "俄罗斯",
+    "RU": "俄罗斯",
+    "ru": "俄罗斯",
     "Taiwan": "台湾",
     "Taiwan Province of China": "台湾",
     "Hong Kong": "香港",
@@ -4576,7 +4758,28 @@ const translateCountry = c => {
     "Iceland": "冰岛",
     "Luxembourg": "卢森堡"
   };
-  return dict[c] || c || "-";
+  const key = String(c || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const alias = {
+    "japan": "日本", "jp": "日本", "jpn": "日本",
+    "korearepublicof": "韩国", "korea": "韩国", "republicofkorea": "韩国", "southkorea": "韩国", "kr": "韩国", "kor": "韩国",
+    "thailand": "泰国", "th": "泰国", "tha": "泰国",
+    "unitedstates": "美国", "unitedstatesofamerica": "美国", "usa": "美国", "us": "美国",
+    "unitedkingdom": "英国", "uk": "英国", "gb": "英国", "gbr": "英国",
+    "russianfederation": "俄罗斯", "russian": "俄罗斯", "russia": "俄罗斯", "ru": "俄罗斯", "rus": "俄罗斯",
+    "vietnam": "越南", "vietnam": "越南", "vn": "越南", "vnm": "越南",
+    "china": "中国", "cn": "中国", "chn": "中国",
+    "taiwan": "台湾", "taiwanprovinceofchina": "台湾", "tw": "台湾", "twn": "台湾",
+    "hongkong": "香港", "hk": "香港", "hkg": "香港",
+    "singapore": "新加坡", "sg": "新加坡", "sgp": "新加坡",
+    "malaysia": "马来西亚", "my": "马来西亚", "mys": "马来西亚",
+    "indonesia": "印度尼西亚", "id": "印度尼西亚", "idn": "印度尼西亚",
+    "india": "印度", "in": "印度", "ind": "印度",
+    "philippines": "菲律宾", "ph": "菲律宾", "phl": "菲律宾",
+    "australia": "澳大利亚", "au": "澳大利亚", "aus": "澳大利亚",
+    "newzealand": "新西兰", "nz": "新西兰", "nzl": "新西兰",
+    "canada": "加拿大", "ca": "加拿大", "can": "加拿大"
+  };
+  return dict[c] || alias[key] || c || "-";
 };
 
 const translateStatus = s => {
@@ -4827,7 +5030,7 @@ function render(){
 
   // Render table rows by source. 两个来源只是放在同一个 UI，展示和测试都按来源分组。
   if (currentPageNodes.length === 0) {
-    $("rows").innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
+    $("rows").innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 40px 0;">未找到符合过滤条件的备选节点。</td></tr>`;
   } else {
     const sourceCounts = shown.reduce((acc, n) => {
       const source = nodeSource(n);
@@ -4842,7 +5045,7 @@ function render(){
       if (source !== lastRenderedSource) {
         lastRenderedSource = source;
         const testableCount = currentPageNodes.filter(item => item && nodeSource(item) === source && !item.active && item.probe_status !== "testing").length;
-        sourceHeader = `<tr class="source-separator-row"><td colspan="6" style="background: rgba(99,102,241,0.08); border-top: 1px solid rgba(99,102,241,0.25); border-bottom: 1px solid rgba(99,102,241,0.18); padding: 10px 14px; color: var(--text-primary);">
+        sourceHeader = `<tr class="source-separator-row"><td colspan="7" style="background: rgba(99,102,241,0.08); border-top: 1px solid rgba(99,102,241,0.25); border-bottom: 1px solid rgba(99,102,241,0.18); padding: 10px 14px; color: var(--text-primary);">
           <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
             <div><strong>${esc(sourceLabel(source))}</strong><span style="margin-left:8px; color:var(--text-secondary); font-size:12px;">${sourceCounts[source] || 0} 个节点，独立展示、独立检测</span></div>
             <button type="button" class="test-btn" style="height:28px; padding:0 10px;" ${testableCount ? '' : 'disabled'} onclick="testVisibleSourceNodes('${esc(source)}', event)">检测本组前5个</button>
@@ -4856,6 +5059,7 @@ function render(){
       const badgeText = isCurrentlyActive ? '<span class="badge-pulse"></span>已连接' : translateStatus(n.probe_status);
       const latencyClass = getLatencyClass(n.latency_ms);
       const displayLocation = n.location || translateCountry(n.country) || "-";
+      const displaySpeed = nodeSpeed(n);
 
       const isTesting = testingNodeIds.has(n.id) || n.probe_status === "testing";
       const testSpinner = `<svg style="animation: spin 1s linear infinite; width: 12px; height: 12px; display: inline-block; margin-right: 4px; vertical-align: middle;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" fill="none"></circle><path d="M4 12a8 8 0 018-8" stroke="currentColor" fill="none"></path></svg>`;
@@ -4878,6 +5082,7 @@ function render(){
         <td class="mono" style="white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.ip||n.remote_host)}:${n.remote_port||""}"><span class="badge" style="margin-right:6px; padding:1px 6px; font-size:10px;">${esc(sourceLabel(source))}</span>${esc(n.ip||n.remote_host)}:${n.remote_port||""}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(displayLocation)}">${esc(displayLocation)}</td>
         <td style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(n.owner||n.as_name||"-")}">${esc(n.owner||n.as_name||"-")}</td>
+        <td class="mono" style="white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis;" title="${esc(source === "publicvpnlist" ? "PublicVPNList 页面 Speed" : "VPNGate Speed")}: ${esc(displaySpeed)}">${esc(displaySpeed)}</td>
         <td style="white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis;" title="${esc(source === "publicvpnlist" ? "PublicVPNList 不使用住宅/机房分类" : translateIpType(n.ip_type))}">${esc(source === "publicvpnlist" ? "独立来源" : translateIpType(n.ip_type))}</td>
         <td>
           <div class="table-actions">
