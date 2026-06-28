@@ -2799,13 +2799,10 @@ def maintain_valid_nodes(force: bool = False) -> str:
                             cand[key] = previous.get(key)
                 add_merged(cand)
 
-            # 低水位补池或每日刷新时，不移除已经验证可用的节点；未超过失败阈值的不可用节点也保留，
-            # 后续周期会复用已有配置优先重测，避免因为一次超时反复重新下载。
+            # 低水位补池或每日刷新时，不移除本地已经下载/导入且未达到失败阈值的节点，
+            # 最终由 MAX_NODE_POOL_SIZE 控制累计池大小；可用节点保留但不在周期刷新中反复重测。
             for existing in current_nodes:
-                if existing.get("active") or existing.get("probe_status") == "available":
-                    add_merged(existing)
-                elif existing.get("probe_status") == "unavailable" and not node_exceeded_unavailable_limit(existing):
-                    add_merged(existing)
+                add_merged(existing)
 
             merged = trim_node_pool(merged)
                 
@@ -2829,53 +2826,72 @@ def maintain_valid_nodes(force: bool = False) -> str:
         if should_fast_connect:
             with lock:
                 current_nodes = read_nodes()
-                fast_candidates = [
+                available_candidates = [
                     n for n in current_nodes
-                    if not n.get("active") and n.get("probe_status") != "unavailable"
+                    if not n.get("active") and n.get("probe_status") == "available"
                 ]
-                fast_candidates = apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=True)
-                fast_candidates.sort(key=probe_priority_key)
-                fast_test_ids = [
-                    n["id"] for n in fast_candidates
-                    if n.get("id")
-                ][:INITIAL_CONNECT_TEST_LIMIT]
+                available_candidates = apply_routing_filters(available_candidates, ui_cfg)
 
-            if fast_test_ids:
-                initial_tested_ids = set(fast_test_ids)
-                msg = f"首次快速连接模式：优先测试 {len(fast_test_ids)} 个高优先级节点，发现可用节点后立即连接"
-                print(f"[快速首连] {msg}", flush=True)
-                log_to_json("INFO", "Main", msg)
-                set_state(last_check_message=msg)
-                test_multiple_nodes(fast_test_ids)
-
+            if available_candidates:
+                set_state(last_check_message="已有可用节点，跳过重复检测并直接建立连接...")
+                auto_switch_node()
+            else:
                 with lock:
-                    fast_nodes = read_nodes()
-                    available_candidates = [
-                        n for n in fast_nodes
-                        if n.get("probe_status") == "available" and not n.get("active")
+                    current_nodes = read_nodes()
+                    fast_candidates = [
+                        n for n in current_nodes
+                        if not n.get("active") and n.get("probe_status") in ("not_checked", "testing")
                     ]
-                    available_candidates = apply_routing_filters(available_candidates, ui_cfg)
+                    fast_candidates = apply_routing_filters(fast_candidates, ui_cfg, include_unknown_ip_type=True)
+                    fast_candidates.sort(key=probe_priority_key)
+                    fast_test_ids = [
+                        n["id"] for n in fast_candidates
+                        if n.get("id")
+                    ][:INITIAL_CONNECT_TEST_LIMIT]
 
-                if available_candidates:
-                    set_state(last_check_message="快速首连已找到可用节点，正在建立连接...")
-                    auto_switch_node()
-                    if active_openvpn_running():
-                        valid_nodes_count = len([n for n in read_nodes() if n.get("probe_status") == "available"])
-                        message = f"Fetched {len(candidates)} nodes. Fast-tested {len(fast_test_ids)} nodes and connected. 正在继续检测剩余候选节点。"
-                        set_state(
-                            last_check_at=time.time(),
-                            last_check_message=message,
-                            active_openvpn_node_id=active_openvpn_node_id,
-                            valid_nodes=valid_nodes_count,
-                        )
+                if fast_test_ids:
+                    initial_tested_ids = set(fast_test_ids)
+                    msg = f"首次快速连接模式：优先测试 {len(fast_test_ids)} 个未验证高优先级节点，发现可用节点后立即连接"
+                    print(f"[快速首连] {msg}", flush=True)
+                    log_to_json("INFO", "Main", msg)
+                    set_state(last_check_message=msg)
+                    test_multiple_nodes(fast_test_ids)
 
-        # Test remaining non-active nodes from the list
+                    with lock:
+                        fast_nodes = read_nodes()
+                        available_candidates = [
+                            n for n in fast_nodes
+                            if n.get("probe_status") == "available" and not n.get("active")
+                        ]
+                        available_candidates = apply_routing_filters(available_candidates, ui_cfg)
+
+                    if available_candidates:
+                        set_state(last_check_message="快速首连已找到可用节点，正在建立连接...")
+                        auto_switch_node()
+                        if active_openvpn_running():
+                            valid_nodes_count = len([n for n in read_nodes() if n.get("probe_status") == "available"])
+                            message = f"Fetched {len(candidates)} nodes. Fast-tested {len(fast_test_ids)} new nodes and connected. 正在继续复测不可用节点。"
+                            set_state(
+                                last_check_at=time.time(),
+                                last_check_message=message,
+                                active_openvpn_node_id=active_openvpn_node_id,
+                                valid_nodes=valid_nodes_count,
+                            )
+
+        # 周期刷新只复测不可用节点，并对新导入但尚未验证的节点做首次检测；
+        # 已验证可用节点不反复测试，避免刷新时把健康节点误打掉或阻塞连接。
         with lock:
             current_nodes = read_nodes()
             to_test = sorted(
                 [
                     n for n in current_nodes
-                    if not n.get("active") and n.get("id") not in initial_tested_ids
+                    if not n.get("active")
+                    and n.get("id") not in initial_tested_ids
+                    and (
+                        n.get("probe_status") == "unavailable"
+                        or n.get("probe_status") in ("not_checked", "testing")
+                    )
+                    and not node_exceeded_unavailable_limit(n)
                 ],
                 key=lambda n: (
                     0 if n.get("probe_status") == "unavailable" else 1,
@@ -2884,13 +2900,24 @@ def maintain_valid_nodes(force: bool = False) -> str:
                 ),
             )
             to_test_ids = [n["id"] for n in to_test if n.get("id")]
-            
-        msg = f"开始对列表中所有候选节点进行周期连通性与延迟测试，待检测节点共 {len(to_test_ids)} 个"
+            unavailable_retest_count = len([n for n in to_test if n.get("probe_status") == "unavailable"])
+            new_pending_test_count = len([n for n in to_test if n.get("probe_status") in ("not_checked", "testing")])
+            skipped_available_count = len([
+                n for n in current_nodes
+                if not n.get("active") and n.get("probe_status") == "available"
+            ])
+
+        msg = (
+            f"开始周期节点检测：复测不可用节点 {unavailable_retest_count} 个，"
+            f"首次检测新导入节点 {new_pending_test_count} 个，"
+            f"跳过已验证可用节点 {skipped_available_count} 个"
+        )
         print(f"[周期检测] {msg}", flush=True)
         log_to_json("INFO", "Main", msg)
-        
-        set_state(last_check_message="正在并发检测所有节点可用性...")
-        test_multiple_nodes(to_test_ids)
+
+        set_state(last_check_message="正在复测不可用节点与首次检测新导入节点...")
+        if to_test_ids:
+            test_multiple_nodes(to_test_ids)
 
         with lock:
             merged = read_nodes()
@@ -2928,9 +2955,12 @@ def maintain_valid_nodes(force: bool = False) -> str:
                             auto_switch_node()
 
         valid_nodes_count = len([n for n in merged if n.get("probe_status") == "available"])
-        message = f"Fetched {len(candidates)} nodes. Tested {len(to_test_ids)} non-active nodes."
+        message = (
+            f"Fetched {len(candidates)} nodes. Retested {unavailable_retest_count} unavailable nodes "
+            f"and first-tested {new_pending_test_count} new nodes; skipped {skipped_available_count} available nodes."
+        )
         if no_new_candidates:
-            message += " 没有拉取到新节点，已复测保留节点。"
+            message += " 没有拉取到新节点，已复测保留的不可用节点。"
         set_state(
             last_check_at=time.time(),
             last_check_message=message,
